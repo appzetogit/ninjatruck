@@ -21,8 +21,8 @@ const HeaderGreeting = ({ floating = false, hideSearch = false }) => {
 
   const { settings, loading, hasBootstrapSettings } = useSettings();
   const appLogo = settings.general?.logo || settings.customization?.logo || settings.general?.favicon || '';
-  let appName = settings.general?.app_name || 'Appzeto ';
-  if (appName === 'Appzeto') appName = 'Appzeto ';
+  let appName = settings.general?.app_name || 'Ninja Truck';
+  appName = String(appName).split(/\s+[—-]\s+/)[0]; // drop the tagline
   const [locationLabel, setLocationLabel] = useState(getSavedLocationLabel);
   const showBrandingSkeleton = loading && !hasBootstrapSettings && !appLogo;
 

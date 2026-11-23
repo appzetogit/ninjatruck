@@ -43,6 +43,7 @@ import {
   RazorpayLaunchPage,
   RazorpayStatusPage,
   RentalConfirmed,
+  UserVehicleInsurance,
   RentalDeposit,
   RentalKYC,
   RentalSchedule,
@@ -138,6 +139,7 @@ const publicRoutes = (
       <Route path="/parcel/tracking" element={<ParcelTracking />} />
       <Route path="/parcel/detail/:id" element={<RideDetail />} />
 
+      <Route path="/insurance" element={<UserVehicleInsurance />} />
       <Route path="/rental" element={<BikeRentalHome />} />
       <Route path="/rental/vehicle" element={<RentalVehicleDetail />} />
       <Route path="/rental/schedule" element={<RentalSchedule />} />

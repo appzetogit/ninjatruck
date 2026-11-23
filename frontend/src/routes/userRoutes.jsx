@@ -34,6 +34,7 @@ import {
   ProfileSettings,
   PromoCodes,
   RentalConfirmed,
+  UserVehicleInsurance,
   RentalDeposit,
   RentalKYC,
   RentalSchedule,
@@ -112,6 +113,7 @@ const userRoutes = (
       <Route path="/taxi/user/pooling/list" element={<UserPoolingList />} />
       <Route path="/taxi/user/pooling/seats/:id" element={<UserPoolingSeats />} />
       <Route path="/taxi/user/pooling/confirm" element={<UserPoolingConfirm />} />
+      <Route path="/taxi/user/insurance" element={<UserVehicleInsurance />} />
       <Route path="/taxi/user/rental" element={<BikeRentalHome />} />
       <Route path="/taxi/user/rental/vehicle" element={<RentalVehicleDetail />} />
       <Route path="/taxi/user/rental/schedule" element={<RentalSchedule />} />
