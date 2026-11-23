@@ -81,6 +81,9 @@ export const ADMIN_SIDEBAR_SECTIONS = [
           { label: 'Plans & Settings', path: '/admin/settings/business/driver-subscription', permission: 'settings.view' },
         ],
       },
+      /* Hidden for Ninja Truck: Price Hike, Rental, Bus Service, Dhaba & Food
+         and Car Pooling are not part of the Ninja Truck product. The pages
+         and routes still exist; uncomment to bring the menus back.
       {
         icon: TrendingUp,
         label: 'Price Hike',
@@ -88,8 +91,6 @@ export const ADMIN_SIDEBAR_SECTIONS = [
           { label: 'Hike Slots', path: '/admin/pricing/price-hike', permission: 'set_prices.view' },
         ],
       },
-      /* Hidden for Ninja Truck: Rental and Bus Service are ZI CAB products.
-         The pages and routes still exist; uncomment to bring the menus back.
       {
         icon: Briefcase,
         label: 'Rental',
@@ -120,7 +121,6 @@ export const ADMIN_SIDEBAR_SECTIONS = [
           { label: 'Booking Channels', path: '/admin/bus-service/channels', permission: 'bus_service.view' },
         ],
       },
-      */
       {
         icon: UtensilsCrossed,
         label: 'Dhaba & Food',
@@ -144,6 +144,7 @@ export const ADMIN_SIDEBAR_SECTIONS = [
           { label: 'Pooling Bookings', path: '/admin/pooling/bookings', permission: 'pooling.view' },
         ],
       },
+      */
       {
         icon: MapPin,
         label: 'Geofencing',
@@ -207,6 +208,7 @@ export const ADMIN_SIDEBAR_SECTIONS = [
           { label: 'Reward Claims', path: '/admin/referrals/reward-claims', permission: 'referrals.view' },
         ],
       },
+      /* Hidden for Ninja Truck (uncomment to bring back).
       {
         icon: UserCog,
         label: 'Employee Management',
@@ -215,6 +217,7 @@ export const ADMIN_SIDEBAR_SECTIONS = [
           { label: 'Add Employee', path: '/admin/employees/create', permission: 'employees.view' },
         ],
       },
+      */
       { icon: Briefcase, label: 'Owner Management', path: '/admin/owners/dashboard', permission: 'owners.view' },
       {
         icon: FileText,
@@ -236,6 +239,7 @@ export const ADMIN_SIDEBAR_SECTIONS = [
           { label: 'Support Tickets', path: '/admin/support/tickets', permission: 'support.view' },
         ],
       },
+      /* Hidden for Ninja Truck (uncomment to bring back).
       {
         icon: Briefcase,
         label: 'Careers Management',
@@ -244,6 +248,7 @@ export const ADMIN_SIDEBAR_SECTIONS = [
           { label: 'Applications', path: '/admin/careers/applications', permission: 'support.view' },
         ],
       },
+      */
     ],
   },
   {
