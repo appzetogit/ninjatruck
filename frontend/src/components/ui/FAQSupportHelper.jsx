@@ -6,23 +6,23 @@ import {
 } from 'lucide-react';
 
 const categories = [
-  { id: 'booking', label: 'Ride Bookings', icon: Compass, color: 'text-amber-400 bg-amber-400/10' },
+  { id: 'booking', label: 'Truck Bookings', icon: Compass, color: 'text-amber-400 bg-amber-400/10' },
   { id: 'payment', label: 'Refunds & Payments', icon: RefreshCw, color: 'text-blue-400 bg-blue-400/10' },
   { id: 'safety', label: 'Safety & Help', icon: ShieldCheck, color: 'text-emerald-400 bg-emerald-400/10' },
 ];
 
 const categoryAnswers = {
   booking: [
-    { sender: 'user', text: 'How do I cancel my active cab booking?' },
-    { sender: 'agent', text: 'You can tap "Cancel Ride" directly on your active trip screen. If the driver is not yet assigned or was assigned less than 5 minutes ago, cancellation is completely free!' }
+    { sender: 'user', text: 'How do I cancel my truck booking?' },
+    { sender: 'agent', text: 'You can tap "Cancel" directly on your active booking screen. If a truck is not yet assigned or was assigned less than 5 minutes ago, cancellation is completely free!' }
   ],
   payment: [
     { sender: 'user', text: 'I was charged twice. How to request a refund?' },
     { sender: 'agent', text: 'No worries! Go to your Wallet & Activity tab, select the transaction, and click "Dispute/Refund". Our automated system will review it and refund duplicate charges within 3-5 business days.' }
   ],
   safety: [
-    { sender: 'user', text: 'What security measures do you have for solo riders?' },
-    { sender: 'agent', text: 'Every trip is GPS-tracked 24/7. We have a live "SOS Button" in the user app to instantly share your location with emergency contacts and our dedicated safety response team.' }
+    { sender: 'user', text: 'How do you keep my goods safe in transit?' },
+    { sender: 'agent', text: 'Every truck is GPS-tracked 24/7, drivers are verified, and goods insurance covers your cargo. You can follow the shipment live in the app and reach our support team any time.' }
   ]
 };
 
@@ -35,7 +35,7 @@ const incomingTickets = [
 const ticketTemplates = [
   { user: 'Vikram J.', category: 'Safety', status: 'Resolved', text: 'SOS contact list configured successfully' },
   { user: 'Sneha P.', category: 'Promo', status: 'Active', text: 'Applying welcome coupon code issue resolved' },
-  { user: 'Rohit B.', category: 'Ride', status: 'Resolved', text: 'Route verification ticket closed' },
+  { user: 'Rohit B.', category: 'Shipment', status: 'Resolved', text: 'Delivery route verified and closed' },
   { user: 'Karan L.', category: 'Payment', status: 'Resolved', text: 'Wallet balance auto-added successfully' },
 ];
 

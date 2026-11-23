@@ -1,18 +1,17 @@
-import { useEffect, useState } from 'react';
+import { useEffect } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
+import NinjaHeader from '../components/NinjaHeader';
+import NinjaFooter from '../components/NinjaFooter';
+import { DRIVER_LOGIN, USER_LOGIN } from '../components/ninjaBrand';
 import {
   ArrowRight,
   Box,
   CircleCheck,
   Clock,
   FastForward,
-  Mail,
-  Menu,
   Package,
-  Phone,
   ShieldCheck,
   Truck,
-  X,
 } from 'lucide-react';
 import { useSettings } from '../../../shared/context/SettingsContext';
 
@@ -23,18 +22,6 @@ import { useSettings } from '../../../shared/context/SettingsContext';
  * ink #111111, Outfit black uppercase headings.
  */
 
-const PHONE = '8942852470';
-const EMAIL = 'support@ninjatruck.in';
-const USER_LOGIN = '/taxi/user/login';
-const DRIVER_LOGIN = '/taxi/driver/login';
-
-const NAV = [
-  { label: 'Home', to: '/' },
-  { label: 'Company', to: '/about' },
-  { label: 'Logistics', to: '/services' },
-  { label: 'FAQs', to: '/faq' },
-  { label: 'Contact', to: '/contact' },
-];
 
 const MAIN_SERVICES = [
   { icon: Package, title: 'Courier', text: 'Secure parcel delivery for personal packages or e-commerce businesses.' },
@@ -108,7 +95,6 @@ const SectionLabel = ({ children }) => (
 
 const NinjaTruckHome = () => {
   const navigate = useNavigate();
-  const [menuOpen, setMenuOpen] = useState(false);
 
   // SettingsContext sets the app-wide title whenever settings load. This page
   // re-applies its own title after each of those updates.
@@ -131,83 +117,7 @@ const NinjaTruckHome = () => {
 
   return (
     <div className="min-h-screen bg-[#F9C105] font-['Outfit',sans-serif] text-slate-800 overflow-x-hidden selection:bg-[#111111] selection:text-[#F9C105]">
-      {/* Top bar */}
-      <div className="hidden lg:flex justify-between items-center px-8 lg:px-16 py-3 bg-[#111111] text-[#F9C105] font-bold text-sm tracking-widest border-b-4 border-[#F9C105]">
-        <span>(WE DELIVER) ALL OVER INDIA LOGISTICS</span>
-        <div className="flex gap-8">
-          <a href={`tel:${PHONE}`} className="flex items-center gap-2 hover:text-white transition-colors">
-            <Phone size={16} />
-            <span>CALL US {PHONE}</span>
-          </a>
-          <a href={`mailto:${EMAIL}`} className="flex items-center gap-2 hover:text-white transition-colors">
-            <Mail size={16} />
-            <span>{EMAIL.toUpperCase()}</span>
-          </a>
-        </div>
-      </div>
-
-      {/* Header */}
-      <header className="sticky top-0 z-50 bg-[#F9C105]/95 backdrop-blur-lg border-b-2 border-[#e6b204] shadow-2xl">
-        <div className="max-w-7xl mx-auto px-6 lg:px-16 flex items-center justify-between h-24">
-          <Link to="/" className="font-black text-3xl tracking-tighter text-[#111111] flex items-center gap-2 leading-none">
-            <span className="drop-shadow-sm">NINJA TRUCK</span>
-            <span className="hidden sm:inline font-bold tracking-widest text-slate-800 text-lg">LOGISTICS</span>
-          </Link>
-
-          <nav className="hidden lg:flex items-center gap-10 font-black text-slate-800 tracking-wider text-sm uppercase">
-            {NAV.map(({ label, to }) => (
-              <Link
-                key={label}
-                to={to}
-                className={`hover:text-black transition-colors ${to === '/' ? 'text-black border-b-2 border-black pb-1' : ''}`}
-              >
-                {label}
-              </Link>
-            ))}
-          </nav>
-
-          <div className="hidden lg:flex items-center gap-4">
-            <Link to={USER_LOGIN} className="font-bold text-slate-800 hover:text-black px-4 py-2 transition-colors">
-              LOGIN
-            </Link>
-            <button
-              type="button"
-              onClick={bookTruck}
-              className="bg-[#111111] text-[#F9C105] hover:bg-black px-8 py-3 font-black tracking-widest uppercase transition-all hover:scale-105 active:scale-95 shadow-[4px_4px_0px_0px_rgba(0,0,0,0.2)]"
-            >
-              Book Truck
-            </button>
-          </div>
-
-          <button
-            type="button"
-            className="lg:hidden p-2 -mr-2 text-[#111111]"
-            aria-label={menuOpen ? 'Close menu' : 'Open menu'}
-            aria-expanded={menuOpen}
-            onClick={() => setMenuOpen((o) => !o)}
-          >
-            {menuOpen ? <X size={28} /> : <Menu size={28} />}
-          </button>
-        </div>
-
-        {menuOpen && (
-          <div className="lg:hidden border-t-2 border-[#111111] bg-[#F9C105] px-6 py-6 flex flex-col gap-5 font-black tracking-wider uppercase text-[#111111]">
-            {NAV.map(({ label, to }) => (
-              <Link key={label} to={to} onClick={() => setMenuOpen(false)}>
-                {label}
-              </Link>
-            ))}
-            <Link to={USER_LOGIN}>Login</Link>
-            <button
-              type="button"
-              onClick={bookTruck}
-              className="bg-[#111111] text-[#F9C105] px-6 py-4 font-black tracking-widest uppercase"
-            >
-              Book Truck
-            </button>
-          </div>
-        )}
-      </header>
+      <NinjaHeader />
 
       {/* Hero */}
       <section id="home" className="relative pt-12 pb-24 lg:pt-24 lg:pb-32 px-6 lg:px-16 overflow-hidden max-w-7xl mx-auto">
@@ -360,47 +270,7 @@ const NinjaTruckHome = () => {
         </div>
       </section>
 
-      {/* Footer */}
-      <footer id="contact" className="bg-[#F9C105] pt-24 pb-12 px-6 lg:px-16 text-slate-800 border-t-2 border-[#111111]">
-        <div className="max-w-7xl mx-auto grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-16 lg:gap-8 mb-20">
-          <div className="lg:col-span-2 lg:pr-16">
-            <Link to="/" className="font-black text-4xl tracking-tighter text-[#111111] inline-block mb-8">
-              NINJA TRUCK
-            </Link>
-            <p className="font-bold leading-relaxed mb-8 text-lg">
-              We provide the best logistics and truck rental services in the region. Reliable, fast, and secure
-              deliveries at your fingertips.
-            </p>
-            <div className="font-black tracking-widest text-[#111111] text-xl bg-white/40 inline-block px-4 py-2 rounded-lg border border-[#111111]/10">
-              WWW.NINJATRUCK.IN
-            </div>
-          </div>
-          <div>
-            <h4 className="font-black text-[#111111] text-xl uppercase tracking-widest mb-8">Quick Links</h4>
-            <ul className="flex flex-col gap-5 font-bold tracking-wide">
-              <li><Link className="hover:text-black hover:underline" to="/terms">Terms &amp; Conditions</Link></li>
-              <li><Link className="hover:text-black hover:underline" to="/privacy">Privacy Policy</Link></li>
-              <li><Link className="hover:text-black hover:underline" to="/refund">Refund Policy</Link></li>
-              <li><Link className="hover:text-black hover:underline" to="/contact">Contact Us</Link></li>
-            </ul>
-          </div>
-          <div>
-            <h4 className="font-black text-[#111111] text-xl uppercase tracking-widest mb-8">Services</h4>
-            <ul className="flex flex-col gap-5 font-bold tracking-wide">
-              {['Mini Trucks', 'Heavy Vehicles', 'Intercity', 'Packers & Movers'].map((s) => (
-                <li key={s}><Link className="hover:text-black hover:underline" to="/services">{s}</Link></li>
-              ))}
-            </ul>
-          </div>
-        </div>
-        <div className="max-w-7xl mx-auto border-t-2 border-[#111111]/20 pt-8 flex flex-col md:flex-row items-center justify-between gap-6 font-bold tracking-wider text-sm text-[#111111]">
-          <div className="flex items-center gap-8">
-            <Link className="hover:text-black hover:underline" to="/privacy">PRIVACY POLICY</Link>
-            <Link className="hover:text-black hover:underline" to="/terms">TERMS &amp; CONDITIONS</Link>
-          </div>
-          <div className="font-black text-center">COPYRIGHT {new Date().getFullYear()} © NINJA TRUCK LOGISTICS.</div>
-        </div>
-      </footer>
+      <NinjaFooter />
     </div>
   );
 };

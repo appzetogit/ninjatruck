@@ -14,7 +14,7 @@ const Corporate = () => {
   const [contactPerson, setContactPerson] = useState('');
   const [email, setEmail] = useState('');
   const [phone, setPhone] = useState('');
-  const [monthlyRides, setMonthlyRides] = useState('50-200 Rides');
+  const [monthlyRides, setMonthlyRides] = useState('50-200 Shipments');
 
   const handleSubmit = (e) => {
     submit(e, {
@@ -49,7 +49,7 @@ const Corporate = () => {
           <div className="corp-info">
             <h2 className="section-title">{corporatePage.benefitsHeading}</h2>
             <p className="body-text">
-              Managing corporate travel expenses and ensuring employee safety can be challenging. ZI CAB simplifies B2B travel with automated booking tools, zero surge pricing, and customized billing contracts.
+              Moving stock between factories, warehouses and customers should not mean chasing brokers. Ninja Truck gives your business on-demand trucks, live GPS tracking on every load, insured goods and one consolidated monthly invoice.
             </p>
 
             <div className="benefits-column">
@@ -58,7 +58,7 @@ const Corporate = () => {
                 return (
                   <div key={i} className="b-item">
                     <div className="b-icon">
-                      <Icon size={22} color="#00BBA9" />
+                      <Icon size={22} color="#7a5c00" />
                     </div>
                     <div>
                       <h4 className="b-title">{b.title}</h4>
@@ -77,10 +77,10 @@ const Corporate = () => {
 
             {submitted ? (
               <div className="form-success text-center py-6">
-                <CheckCircle2 size={50} color="#00BBA9" className="mx-auto mb-4" />
+                <CheckCircle2 size={50} color="#F9C105" className="mx-auto mb-4" />
                 <h4 className="text-xl font-bold text-white mb-2">Inquiry Submitted!</h4>
                 <p className="text-gray-300 text-sm">
-                  Our Corporate Account Manager will contact <strong>{contactPerson}</strong> at <strong>{email}</strong> shortly.
+                  Our Business Logistics Manager will contact <strong>{contactPerson}</strong> at <strong>{email}</strong> shortly.
                 </p>
               </div>
             ) : (
@@ -90,7 +90,7 @@ const Corporate = () => {
                   <input 
                     type="text" 
                     required 
-                    placeholder="e.g. Infosys / TCS / Accenture"
+                    placeholder="e.g. Sharma Industries Pvt Ltd"
                     value={companyName}
                     onChange={(e) => setCompanyName(e.target.value)}
                   />
@@ -130,11 +130,11 @@ const Corporate = () => {
                 </div>
 
                 <div className="input-group">
-                  <label>Estimated Monthly Rides</label>
+                  <label>Estimated Monthly Shipments</label>
                   <select value={monthlyRides} onChange={(e) => setMonthlyRides(e.target.value)}>
-                    <option value="10-50 Rides">10 - 50 Rides / month</option>
-                    <option value="50-200 Rides">50 - 200 Rides / month</option>
-                    <option value="200+ Rides">200+ Rides / month</option>
+                    <option value="10-50 Shipments">10 - 50 Shipments / month</option>
+                    <option value="50-200 Shipments">50 - 200 Shipments / month</option>
+                    <option value="200+ Shipments">200+ Shipments / month</option>
                   </select>
                 </div>
 
@@ -142,7 +142,7 @@ const Corporate = () => {
                   <p style={{ color: '#e11d48', fontSize: '0.85rem', marginBottom: '0.75rem' }}>{error}</p>
                 )}
                 <button type="submit" className="btn btn-teal w-full mt-4" disabled={sending}>
-                  {sending ? 'Sending\u2026' : 'Submit Corporate Inquiry'} <Send size={16} />
+                  {sending ? 'Sending\u2026' : 'Submit Business Inquiry'} <Send size={16} />
                 </button>
               </form>
             )}
@@ -178,7 +178,7 @@ const Corporate = () => {
           .b-icon {
             width: 44px;
             height: 44px;
-            background: rgba(0, 187, 169, 0.1);
+            background: rgba(249, 193, 5, 0.18);
             border-radius: 10px;
             display: flex;
             align-items: center;
@@ -200,8 +200,8 @@ const Corporate = () => {
           }
 
           .corp-form-card {
-            background: #0C1B30;
-            border: 1px solid rgba(0, 187, 169, 0.3);
+            background: #1a1a1a;
+            border: 1px solid rgba(249, 193, 5, 0.3);
             border-radius: 16px;
             padding: 32px;
             color: #FFFFFF;

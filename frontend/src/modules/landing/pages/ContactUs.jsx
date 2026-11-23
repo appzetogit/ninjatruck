@@ -30,10 +30,10 @@ const ContactUs = () => {
     <div className="contact-page animate-fade-in" ref={pageRef}>
       <div className="page-hero">
         <div className="container">
-          <span className="page-tag">24x7 Customer Helpdesk</span>
-          <h1 className="page-title">We Are Here To Assist You</h1>
+          <span className="page-tag">Ninja Truck Support</span>
+          <h1 className="page-title">Talk To Us. We Move Fast.</h1>
           <p className="page-subtitle">
-            Have questions about ride bookings, corporate accounts, or fleet attachment? Connect with our dedicated support team anytime.
+            Truck bookings, live tracking, business accounts or attaching your truck — talk to the Ninja Truck team. We answer fast.
           </p>
         </div>
       </div>
@@ -44,34 +44,34 @@ const ContactUs = () => {
           <div className="contact-cards-grid" data-reveal-stagger>
             <a className="c-info-card" href={`tel:${CONTACT.tollFree.replace(/\s/g, '')}`}>
               <div className="c-icon-wrap">
-                <Phone size={24} color="#00BBA9" />
+                <Phone size={24} color="#7a5c00" />
               </div>
               <h3>Call us</h3>
               <p>{CONTACT.tollFree}</p>
               <span>Calls and WhatsApp on the same number</span>
             </a>
 
-            <a className="c-info-card" href={waLink('Hi ZI CAB, I need help with a booking.')} target="_blank" rel="noreferrer">
+            <a className="c-info-card" href={waLink('Hi Ninja Truck, I need help with a truck booking.')} target="_blank" rel="noreferrer">
               <div className="c-icon-wrap">
-                <MessageSquare size={24} color="#00BBA9" />
+                <MessageSquare size={24} color="#7a5c00" />
               </div>
               <h3>WhatsApp Support</h3>
               <p>{CONTACT.whatsappDisplay}</p>
-              <span>Chat, share live location & get fare</span>
+              <span>Share pickup & drop, get a quote</span>
             </a>
 
             <a className="c-info-card" href={`mailto:${CONTACT.email}`}>
               <div className="c-icon-wrap">
-                <Mail size={24} color="#00BBA9" />
+                <Mail size={24} color="#7a5c00" />
               </div>
               <h3>Official Email</h3>
               <p>{CONTACT.email}</p>
-              <span>Response within 15 mins</span>
+              <span>Quotes, invoices & business enquiries</span>
             </a>
 
             <a className="c-info-card" href={CONTACT.mapsUrl} target="_blank" rel="noreferrer">
               <div className="c-icon-wrap">
-                <MapPin size={24} color="#00BBA9" />
+                <MapPin size={24} color="#7a5c00" />
               </div>
               <h3>Head Office</h3>
               <p>{CONTACT.addressShort}</p>
@@ -89,25 +89,25 @@ const ContactUs = () => {
                 <span className="tf-tag">Toll-Free Support</span>
                 <h2 className="tf-number">{CONTACT.tollFree}</h2>
                 <p className="tf-desc">
-                  One number for bookings, live ride help, lost items, invoices and complaints —
+                  One number for truck bookings, live shipment tracking, invoices and claims —
                   free of charge from any Indian mobile or landline, 24 hours a day.
                 </p>
                 <div className="tf-points">
-                  <div className="tf-point"><CheckCircle2 size={16} color="#00BBA9" /> IVR in English, Kannada & Hindi</div>
-                  <div className="tf-point"><CheckCircle2 size={16} color="#00BBA9" /> Routed to the nearest city support desk</div>
-                  <div className="tf-point"><CheckCircle2 size={16} color="#00BBA9" /> Every call recorded for safety audits</div>
-                  <div className="tf-point"><CheckCircle2 size={16} color="#00BBA9" /> Emergency/SOS calls answered on priority</div>
+                  <div className="tf-point"><CheckCircle2 size={16} color="#F9C105" /> IVR in English & Hindi</div>
+                  <div className="tf-point"><CheckCircle2 size={16} color="#F9C105" /> Routed to the nearest regional desk</div>
+                  <div className="tf-point"><CheckCircle2 size={16} color="#F9C105" /> Every call recorded for safety audits</div>
+                  <div className="tf-point"><CheckCircle2 size={16} color="#F9C105" /> Delays & damage claims answered on priority</div>
                 </div>
               </div>
               <div className="tf-right">
                 <div className="tf-ivr-card">
                   <h4>Call Menu</h4>
                   <ol className="tf-ivr-list">
-                    <li><b>1</b> New booking / fare enquiry</li>
-                    <li><b>2</b> Track or change an ongoing ride</li>
-                    <li><b>3</b> Airport & outstation desk</li>
-                    <li><b>4</b> Corporate & partner accounts</li>
-                    <li><b>5</b> Complaint, refund or lost item</li>
+                    <li><b>1</b> Book a truck / get a quote</li>
+                    <li><b>2</b> Track or change a shipment</li>
+                    <li><b>3</b> Intercity & packers and movers</li>
+                    <li><b>4</b> Business & truck partner accounts</li>
+                    <li><b>5</b> Complaint, refund or insurance claim</li>
                     <li><b>9</b> Emergency — connect to a human</li>
                   </ol>
                 </div>
@@ -118,14 +118,14 @@ const ContactUs = () => {
           {/* OFFICE LOCATION & LAUNCH CITIES */}
           <div className="office-grid mt-12" data-reveal-stagger>
             <div className="office-card">
-              <h3 className="office-title"><MapPin size={18} color="#00BBA9" /> Our Office</h3>
+              <h3 className="office-title"><MapPin size={18} color="#7a5c00" /> Our Office</h3>
               <p className="office-addr">{CONTACT.address}</p>
               <a className="btn btn-teal btn-office" href={CONTACT.mapsUrl} target="_blank" rel="noreferrer">
                 <Navigation size={16} /> Get Directions
               </a>
             </div>
             <div className="office-card">
-              <h3 className="office-title"><Navigation size={18} color="#00BBA9" /> Launch Cities</h3>
+              <h3 className="office-title"><Navigation size={18} color="#7a5c00" /> Service Cities</h3>
               <div className="city-list">
                 {LAUNCH_CITIES.map((c) => (
                   <div key={c.name} className="city-row">
@@ -146,7 +146,7 @@ const ContactUs = () => {
 
               {submitted ? (
                 <div className="form-success py-8 text-center">
-                  <CheckCircle2 size={50} color="#00BBA9" className="mx-auto mb-3" />
+                  <CheckCircle2 size={50} color="#7a5c00" className="mx-auto mb-3" />
                   <h3 className="text-xl font-bold text-gray-900 mb-1">Message Sent Successfully!</h3>
                   <p className="text-gray-600 text-sm">
                     Thank you, <strong>{name}</strong>. We have your message and will reply to <strong>{email}</strong>.
@@ -182,7 +182,7 @@ const ContactUs = () => {
                     <input 
                       type="text" 
                       required 
-                      placeholder="e.g. Booking Assistance / Receipt Request"
+                      placeholder="e.g. Truck Booking / Invoice Request"
                       value={subject}
                       onChange={(e) => setSubject(e.target.value)}
                     />
@@ -257,14 +257,14 @@ const ContactUs = () => {
 
           .c-info-card:hover {
             transform: translateY(-4px);
-            border-color: #00BBA9;
+            border-color: #F9C105;
             box-shadow: var(--shadow-md);
           }
 
           .c-icon-wrap {
             width: 50px;
             height: 50px;
-            background: rgba(0, 187, 169, 0.1);
+            background: #FFF6D1;
             border-radius: 50%;
             display: flex;
             align-items: center;
@@ -282,7 +282,7 @@ const ContactUs = () => {
           .c-info-card p {
             font-size: 15px;
             font-weight: 700;
-            color: #00BBA9;
+            color: #7a5c00;
             margin-bottom: 4px;
           }
 
@@ -304,8 +304,8 @@ const ContactUs = () => {
 
           /* Toll-free explainer */
           .tollfree-banner {
-            background: linear-gradient(135deg, #07152B 0%, #0B1F3A 100%);
-            border: 1px solid rgba(0, 187, 169, 0.3);
+            background: linear-gradient(135deg, #0b0b0b 0%, #111111 100%);
+            border: 1px solid rgba(249, 193, 5, 0.3);
             border-radius: 18px;
             padding: 34px 38px;
             display: grid;
@@ -321,8 +321,8 @@ const ContactUs = () => {
             font-weight: 700;
             letter-spacing: 1px;
             text-transform: uppercase;
-            color: #00BBA9;
-            background: rgba(0, 187, 169, 0.12);
+            color: #F9C105;
+            background: rgba(249, 193, 5, 0.12);
             padding: 4px 12px;
             border-radius: 20px;
             margin-bottom: 10px;
@@ -367,7 +367,7 @@ const ContactUs = () => {
           .tf-ivr-card h4 {
             font-size: 14px;
             font-weight: 700;
-            color: #00BBA9;
+            color: #F9C105;
             margin-bottom: 12px;
           }
 
@@ -386,8 +386,8 @@ const ContactUs = () => {
             height: 22px;
             line-height: 22px;
             text-align: center;
-            background: rgba(0, 187, 169, 0.15);
-            color: #00BBA9;
+            background: rgba(249, 193, 5, 0.15);
+            color: #F9C105;
             border-radius: 6px;
             margin-right: 8px;
             font-size: 12px;
@@ -492,7 +492,7 @@ const ContactUs = () => {
           }
 
           .c-main-form input:focus, .c-main-form textarea:focus {
-            border-color: #00BBA9;
+            border-color: #F9C105;
             background: #FFFFFF;
           }
 
@@ -517,7 +517,7 @@ const ContactUs = () => {
           }
 
           .faq-item.open {
-            border-color: #00BBA9;
+            border-color: #F9C105;
           }
 
           .faq-q-btn {
@@ -541,7 +541,7 @@ const ContactUs = () => {
 
           .faq-item.open .faq-chevron {
             transform: rotate(180deg);
-            color: #00BBA9;
+            color: #7a5c00;
           }
 
           .faq-a-body {

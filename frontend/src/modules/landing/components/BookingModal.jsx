@@ -7,11 +7,11 @@ const BookingModal = ({ isOpen, onClose, selectedVehicle = null }) => {
   const { contact: CONTACT } = useLanding();
   const [step, setStep] = useState(1);
   const [tripType, setTripType] = useState('city');
-  const [pickup, setPickup] = useState('Gandhinagar, Bengaluru');
-  const [drop, setDrop] = useState('Kempegowda Int. Airport (BLR)');
-  const [vehicle, setVehicle] = useState(selectedVehicle || 'Dzire');
+  const [pickup, setPickup] = useState('');
+  const [drop, setDrop] = useState('');
+  const [vehicle, setVehicle] = useState(selectedVehicle || 'Mini Truck');
   const [date, setDate] = useState('2026-08-06');
-  const [passengers, setPassengers] = useState('2');
+  const [passengers, setPassengers] = useState('1');
   const [name, setName] = useState('');
   const [phone, setPhone] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -21,18 +21,18 @@ const BookingModal = ({ isOpen, onClose, selectedVehicle = null }) => {
   if (!isOpen) return null;
 
   const vehicleOptions = [
-    { id: 'Auto', name: 'Auto Rickshaw', rate: '₹17/km', capacity: '3 Seats', eta: '3 mins' },
-    { id: 'Dzire', name: 'Maruti Suzuki Swift Dzire (Sedan)', rate: '₹23/km', capacity: '4 Seats', eta: '4 mins' },
-    { id: 'Ertiga', name: 'Maruti Suzuki Ertiga (MUV)', rate: '₹33/km', capacity: '6 Seats', eta: '6 mins' },
-    { id: 'Innova Crysta', name: 'Toyota Innova Crysta (Premium SUV)', rate: '₹35/km', capacity: '6 Seats', eta: '8 mins' },
-    { id: 'Toyota Fortuner', name: 'Toyota Fortuner (Luxury SUV)', rate: '₹40/km', capacity: '7 Seats', eta: '12 mins' },
+    { id: 'Mini Truck', name: 'Mini Truck (Tata Ace class)', rate: 'Quote on call', capacity: 'Up to 750 kg', eta: 'Intracity' },
+    { id: 'Pickup Truck', name: 'Pickup Truck (Bolero class)', rate: 'Quote on call', capacity: 'Up to 1.5 T', eta: 'City & nearby' },
+    { id: 'LCV', name: 'Light Commercial Truck (14–17 ft)', rate: 'Quote on call', capacity: 'Up to 5 T', eta: 'Intercity' },
+    { id: 'Heavy Truck', name: 'Heavy Truck (19–24 ft)', rate: 'Quote on call', capacity: 'Up to 16 T', eta: 'Industrial' },
+    { id: 'Trailer', name: 'Trailer / Container (32 ft+)', rate: 'Quote on call', capacity: '20 T+', eta: 'Long haul' },
   ];
 
   const tripTypes = [
-    { id: 'auto', label: 'Auto' },
-    { id: 'city', label: 'City Ride' },
-    { id: 'outstation', label: 'Outstation' },
-    { id: 'airport', label: 'Airport Transfer' },
+    { id: 'auto', label: 'Mini Truck' },
+    { id: 'city', label: 'Intracity' },
+    { id: 'outstation', label: 'Intercity' },
+    { id: 'airport', label: 'Packers & Movers' },
   ];
 
   const handleConfirmBooking = async (e) => {
@@ -75,11 +75,11 @@ const BookingModal = ({ isOpen, onClose, selectedVehicle = null }) => {
         {/* Header */}
         <div className="modal-header">
           <div className="modal-title-group">
-            <span className="modal-badge">ZI CAB Dispatch</span>
+            <span className="modal-badge">Ninja Truck Dispatch</span>
             <h3 className="modal-title">
-              {step === 1 && 'Plan Your Ride'}
-              {step === 2 && 'Passenger Details'}
-              {step === 3 && 'Booking Confirmed!'}
+              {step === 1 && 'Book a Truck'}
+              {step === 2 && 'Your Contact Details'}
+              {step === 3 && 'Request Received!'}
             </h3>
           </div>
           <button className="modal-close-btn" onClick={onClose}>
@@ -87,7 +87,7 @@ const BookingModal = ({ isOpen, onClose, selectedVehicle = null }) => {
           </button>
         </div>
 
-        {/* Step 1: Ride Configuration */}
+        {/* Step 1: Shipment Configuration */}
         {step === 1 && (
           <div className="modal-body">
             {/* Trip Type Tabs */}
@@ -104,28 +104,28 @@ const BookingModal = ({ isOpen, onClose, selectedVehicle = null }) => {
             </div>
 
             <div className="input-group">
-              <label><MapPin size={16} color="#00BBA9" /> Pickup Location</label>
-              <input 
-                type="text" 
-                value={pickup} 
-                onChange={(e) => setPickup(e.target.value)} 
-                placeholder="Enter pickup address or landmark"
+              <label><MapPin size={16} color="#F9C105" /> Pickup Location</label>
+              <input
+                type="text"
+                value={pickup}
+                onChange={(e) => setPickup(e.target.value)}
+                placeholder="Pickup address, warehouse or landmark"
               />
             </div>
 
             <div className="input-group">
-              <label><MapPin size={16} color="#00BBA9" /> Drop Location</label>
-              <input 
-                type="text" 
-                value={drop} 
-                onChange={(e) => setDrop(e.target.value)} 
-                placeholder="Enter drop location"
+              <label><MapPin size={16} color="#F9C105" /> Drop Location</label>
+              <input
+                type="text"
+                value={drop}
+                onChange={(e) => setDrop(e.target.value)}
+                placeholder="Drop address — any city in India"
               />
             </div>
 
             <div className="input-row">
               <div className="input-group">
-                <label><Calendar size={16} color="#00BBA9" /> Date & Time</label>
+                <label><Calendar size={16} color="#F9C105" /> Pickup Date</label>
                 <input 
                   type="date" 
                   value={date} 
@@ -134,18 +134,18 @@ const BookingModal = ({ isOpen, onClose, selectedVehicle = null }) => {
               </div>
 
               <div className="input-group">
-                <label><User size={16} color="#00BBA9" /> Passengers</label>
+                <label><User size={16} color="#F9C105" /> Approx. Load</label>
                 <select value={passengers} onChange={(e) => setPassengers(e.target.value)}>
-                  <option value="1">1 Passenger</option>
-                  <option value="2">2 Passengers</option>
-                  <option value="4">4 Passengers</option>
-                  <option value="6">6 Passengers</option>
+                  <option value="1">Under 1 Tonne</option>
+                  <option value="2">1 – 5 Tonnes</option>
+                  <option value="4">5 – 15 Tonnes</option>
+                  <option value="6">15 Tonnes +</option>
                 </select>
               </div>
             </div>
 
             <div className="vehicle-selector">
-              <label className="section-sublabel"><Car size={16} color="#00BBA9" /> Select Preferred Vehicle</label>
+              <label className="section-sublabel"><Car size={16} color="#F9C105" /> Choose Your Truck</label>
               <div className="vehicle-grid">
                 {vehicleOptions.map((v) => (
                   <div 
@@ -171,22 +171,22 @@ const BookingModal = ({ isOpen, onClose, selectedVehicle = null }) => {
                 className="btn btn-teal w-full"
                 onClick={() => setStep(2)}
               >
-                Proceed to Passenger Info <ArrowRight size={18} />
+                Continue <ArrowRight size={18} />
               </button>
             </div>
           </div>
         )}
 
-        {/* Step 2: Passenger Details */}
+        {/* Step 2: Contact Details */}
         {step === 2 && (
           <form onSubmit={handleConfirmBooking} className="modal-body">
             <div className="trip-summary-box">
               <div className="sum-item">
-                <span className="sum-label">Trip:</span>
+                <span className="sum-label">Route:</span>
                 <span className="sum-val">{pickup} → {drop}</span>
               </div>
               <div className="sum-item">
-                <span className="sum-label">Selected Car:</span>
+                <span className="sum-label">Truck:</span>
                 <span className="sum-val highlight">{vehicle}</span>
               </div>
             </div>
@@ -203,7 +203,7 @@ const BookingModal = ({ isOpen, onClose, selectedVehicle = null }) => {
             </div>
 
             <div className="input-group">
-              <label>Phone Number (for Driver WhatsApp / SMS)</label>
+              <label>Phone Number (for quote &amp; driver updates)</label>
               <input 
                 type="tel" 
                 required 
@@ -220,8 +220,8 @@ const BookingModal = ({ isOpen, onClose, selectedVehicle = null }) => {
             )}
 
             <div className="security-notice">
-              <Shield size={16} color="#00BBA9" />
-              <span>Zero cancellation fee • Pay directly to driver or via UPI after trip</span>
+              <Shield size={16} color="#F9C105" />
+              <span>Verified drivers • Insured goods • Live GPS tracking</span>
             </div>
 
             <div className="modal-footer row-btns">
@@ -233,7 +233,7 @@ const BookingModal = ({ isOpen, onClose, selectedVehicle = null }) => {
                 Back
               </button>
               <button type="submit" className="btn btn-teal flex-1" disabled={submitting}>
-                {submitting ? 'Sending…' : 'Confirm Cab Booking'}
+                {submitting ? 'Sending…' : 'Request Truck'}
               </button>
             </div>
           </form>
@@ -243,14 +243,14 @@ const BookingModal = ({ isOpen, onClose, selectedVehicle = null }) => {
         {step === 3 && (
           <div className="modal-body text-center py-6">
             <div className="success-icon-box">
-              <CheckCircle2 size={56} color="#00BBA9" />
+              <CheckCircle2 size={56} color="#F9C105" />
             </div>
-            <h4 className="confirm-title">Cab Booked Successfully!</h4>
+            <h4 className="confirm-title">Truck Request Sent!</h4>
             <p className="confirm-text">
-              Thank you, <strong>{name || 'Rider'}</strong>. Your request reference is <strong>{requestId || 'pending'}</strong>.
+              Thank you, <strong>{name || 'there'}</strong>. Your request reference is <strong>{requestId || 'pending'}</strong>.
             </p>
             <div className="driver-assign-card">
-              <p>📍 Our team will call you shortly to confirm the driver and fare.</p>
+              <p>📍 Our team will call you shortly to confirm the truck, driver and price.</p>
               <p>📞 Call us: {CONTACT.tollFree}</p>
             </div>
 
@@ -269,7 +269,7 @@ const BookingModal = ({ isOpen, onClose, selectedVehicle = null }) => {
             left: 0;
             right: 0;
             bottom: 0;
-            background-color: rgba(7, 21, 43, 0.85);
+            background-color: rgba(6, 6, 6, 0.85);
             backdrop-filter: blur(8px);
             display: flex;
             align-items: center;
@@ -279,8 +279,8 @@ const BookingModal = ({ isOpen, onClose, selectedVehicle = null }) => {
           }
 
           .modal-card {
-            background-color: #0C1B30;
-            border: 1px solid rgba(0, 187, 169, 0.3);
+            background-color: #1a1a1a;
+            border: 1px solid rgba(249, 193, 5, 0.3);
             border-radius: 16px;
             width: 100%;
             max-width: 540px;
@@ -308,15 +308,15 @@ const BookingModal = ({ isOpen, onClose, selectedVehicle = null }) => {
             align-items: flex-start;
             padding: 20px 24px;
             border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-            background-color: #07152B;
+            background-color: #0b0b0b;
           }
 
           .modal-badge {
             display: inline-block;
             font-size: 11px;
             font-weight: 600;
-            color: #00BBA9;
-            background: rgba(0, 187, 169, 0.12);
+            color: #F9C105;
+            background: rgba(249, 193, 5, 0.12);
             padding: 2px 8px;
             border-radius: 4px;
             margin-bottom: 4px;
@@ -370,8 +370,8 @@ const BookingModal = ({ isOpen, onClose, selectedVehicle = null }) => {
           }
 
           .tab-pill.active {
-            background-color: #00BBA9;
-            color: #FFFFFF;
+            background-color: #F9C105;
+            color: #111111;
             font-weight: 600;
           }
 
@@ -407,12 +407,12 @@ const BookingModal = ({ isOpen, onClose, selectedVehicle = null }) => {
           }
 
           .vehicle-card-item:hover {
-            border-color: rgba(0, 187, 169, 0.5);
+            border-color: rgba(249, 193, 5, 0.5);
           }
 
           .vehicle-card-item.selected {
-            border-color: #00BBA9;
-            background: rgba(0, 187, 169, 0.12);
+            border-color: #F9C105;
+            background: rgba(249, 193, 5, 0.12);
           }
 
           .v-item-header {
@@ -428,7 +428,7 @@ const BookingModal = ({ isOpen, onClose, selectedVehicle = null }) => {
           }
 
           .v-rate {
-            color: #00BBA9;
+            color: #F9C105;
           }
 
           .v-item-sub {
@@ -465,11 +465,11 @@ const BookingModal = ({ isOpen, onClose, selectedVehicle = null }) => {
           }
 
           .sum-val.highlight {
-            color: #00BBA9;
+            color: #F9C105;
           }
 
           .sum-val.fare {
-            color: #00BBA9;
+            color: #F9C105;
             font-weight: 700;
             font-size: 14px;
           }
@@ -489,7 +489,7 @@ const BookingModal = ({ isOpen, onClose, selectedVehicle = null }) => {
             gap: 8px;
             font-size: 12px;
             color: #94A3B8;
-            background: rgba(0, 187, 169, 0.06);
+            background: rgba(249, 193, 5, 0.06);
             padding: 8px 12px;
             border-radius: 6px;
           }
@@ -522,8 +522,8 @@ const BookingModal = ({ isOpen, onClose, selectedVehicle = null }) => {
           }
 
           .driver-assign-card {
-            background: rgba(0, 187, 169, 0.08);
-            border: 1px solid rgba(0, 187, 169, 0.2);
+            background: rgba(249, 193, 5, 0.08);
+            border: 1px solid rgba(249, 193, 5, 0.2);
             border-radius: 10px;
             padding: 14px;
             margin-top: 14px;

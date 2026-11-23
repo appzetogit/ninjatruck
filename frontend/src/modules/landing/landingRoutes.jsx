@@ -1,4 +1,4 @@
-import { Route, useOutletContext } from 'react-router-dom';
+import { Navigate, Route, useOutletContext } from 'react-router-dom';
 import LandingShell from './LandingShell';
 import { LANDING_TABS } from './landingTabs';
 import Home from './pages/Home';
@@ -10,7 +10,6 @@ import Partner from './pages/Partner';
 import Driver from './pages/Driver';
 import Advertise from './pages/Advertise';
 import ContactUs from './pages/ContactUs';
-import ZiBus from './pages/ZiBus';
 
 /**
  * The landing pages take `openBookingModal` / `setActiveTab` as props, from when
@@ -28,7 +27,6 @@ const PAGES = {
   home: withShellContext(Home),
   about: withShellContext(AboutUs),
   services: withShellContext(Services),
-  bus: withShellContext(ZiBus),
   corporate: withShellContext(Corporate),
   partner: withShellContext(Partner),
   driver: withShellContext(Driver),
@@ -43,6 +41,8 @@ const PAGES = {
 const landingRoutes = (
   <>
     <Route path="/" element={<NinjaTruckHome />} />
+    {/* ZI Bus is a ZI CAB product; Ninja Truck has no bus service. */}
+    <Route path="/zi-bus" element={<Navigate to="/services" replace />} />
     <Route element={<LandingShell />}>
       {LANDING_TABS.filter(({ id }) => id !== 'home').map(({ id, path }) => {
         const Page = PAGES[id];

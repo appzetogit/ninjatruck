@@ -1,59 +1,23 @@
 import { useLanding } from '../landingContentContext';
 import { LANDING_ICONS } from '../useLandingContent';
-import useAppModules from '../useAppModules';
 import React, { useRef } from 'react';
-import { useNavigate } from 'react-router-dom';
-import {
-  Car, Plane, Compass, Briefcase, Building2, ShoppingBag,
-  CheckCircle, ArrowRight, Bike, Bus
-} from 'lucide-react';
+import { CheckCircle, ArrowRight, Truck } from 'lucide-react';
 import useReveal from '../hooks/useReveal';
 
 const Services = ({ openBookingModal }) => {
   const pageRef = useRef(null);
-  const navigate = useNavigate();
   useReveal(pageRef);
 
 
   const { servicesPage } = useLanding();
-  const appModules = useAppModules();
 
-  // The module list decides which services exist — it is what the app actually
-  // sells. The CMS entries then supply the richer presentation (photo, badge,
-  // feature bullets) for whichever ones have been written up, matched on name.
-  // A module with no CMS entry still renders, using its own icon and blurb.
-  const normalise = (value) =>
-    String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '').replace(/^zi/, '');
-
-  const cmsItems = servicesPage.items || [];
-  // Prefix matching, not equality: the module is "Zi City Ride" while the
-  // write-up is titled "City Ride (Local Cabs)", and neither name is going to be
-  // edited to suit the other.
-  const findCmsMatch = (title) => {
-    const key = normalise(title);
-    if (!key) return undefined;
-    const related = (a, b) => a && b && (a.startsWith(b) || b.startsWith(a));
-    return (
-      cmsItems.find((item) => normalise(item.title) === key || normalise(item.id) === key) ||
-      cmsItems.find((item) => related(normalise(item.title), key) || related(normalise(item.id), key))
-    );
-  };
-
-  const allServices = appModules.length
-    ? appModules.map((module) => {
-        const match = findCmsMatch(module.title) || {};
-        return {
-          ...match,
-          id: module.id,
-          title: module.title,
-          description: match.description || module.desc,
-          tag: match.tag || module.desc,
-          image: match.image || module.image,
-          features: match.features || [],
-          icon: LANDING_ICONS[match.icon] || Car,
-        };
-      })
-    : cmsItems.map((item) => ({ ...item, icon: LANDING_ICONS[item.icon] || Car }));
+  // Ninja Truck lists its logistics services from the CMS write-ups (Website
+  // Content > Services page). The app's module list is the rider-app menu and
+  // is not used here, so its names never leak onto the marketing site.
+  const allServices = (servicesPage.items || []).map((item) => ({
+    ...item,
+    icon: LANDING_ICONS[item.icon] || Truck,
+  }));
 
 
   return (
@@ -81,7 +45,7 @@ const Services = ({ openBookingModal }) => {
                   <div className="s-card-content">
                     <div className="s-title-row">
                       <div className="s-icon-bg">
-                        <IconComp size={22} color="#00BBA9" />
+                        <IconComp size={22} color="#7a5c00" />
                       </div>
                       <h3 className="s-title">{s.title}</h3>
                     </div>
@@ -94,7 +58,7 @@ const Services = ({ openBookingModal }) => {
                       <div className="s-features-list">
                         {s.features.map((feat, i) => (
                           <div key={i} className="sf-item">
-                            <CheckCircle size={15} color="#00BBA9" />
+                            <CheckCircle size={15} color="#7a5c00" />
                             <span>{feat}</span>
                           </div>
                         ))}
@@ -103,13 +67,7 @@ const Services = ({ openBookingModal }) => {
 
                     <button
                       className="btn btn-teal w-full mt-4"
-                      onClick={() => {
-                        if (s.id === 'bus' || normalise(s.title).includes('bus')) {
-                          navigate('/bus');
-                        } else {
-                          openBookingModal?.();
-                        }
-                      }}
+                      onClick={() => openBookingModal?.()}
                     >
                       {servicesPage.ctaLabel} <ArrowRight size={16} />
                     </button>
@@ -143,7 +101,7 @@ const Services = ({ openBookingModal }) => {
           .service-detail-card:hover {
             transform: translateY(-5px);
             box-shadow: var(--shadow-lg);
-            border-color: #00BBA9;
+            border-color: #F9C105;
           }
 
           .s-card-img-box {
@@ -162,14 +120,14 @@ const Services = ({ openBookingModal }) => {
             position: absolute;
             top: 14px;
             right: 14px;
-            background: rgba(7, 21, 43, 0.85);
+            background: rgba(11, 11, 11, 0.85);
             backdrop-filter: blur(6px);
-            color: #00BBA9;
+            color: #F9C105;
             font-size: 11.5px;
             font-weight: 600;
             padding: 4px 12px;
             border-radius: 20px;
-            border: 1px solid rgba(0, 187, 169, 0.4);
+            border: 1px solid rgba(249, 193, 5, 0.4);
           }
 
           .s-card-content {
@@ -189,7 +147,7 @@ const Services = ({ openBookingModal }) => {
           .s-icon-bg {
             width: 40px;
             height: 40px;
-            background: rgba(0, 187, 169, 0.1);
+            background: rgba(249, 193, 5, 0.18);
             border-radius: 10px;
             display: flex;
             align-items: center;

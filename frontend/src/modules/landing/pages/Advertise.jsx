@@ -52,8 +52,8 @@ const Advertise = () => {
           <span className="page-tag">{advertisePage.tag}</span>
           <h1 className="page-title">{advertisePage.title}</h1>
           <p className="page-subtitle">
-            Every ZI CAB trip is a captive screen moment. Put your brand in front of riders and
-            driver-partners across our app, website and driver network in Bengaluru, Mangaluru and Hubballi.
+            Every Ninja Truck is a moving billboard. Put your brand on trucks running highways and
+            city lanes all over India, and in front of the businesses booking them on our app and website.
           </p>
         </div>
       </div>
@@ -66,7 +66,7 @@ const Advertise = () => {
               const Icon = w.icon;
               return (
                 <div key={i} className="why-ad-card">
-                  <div className="why-ad-icon"><Icon size={22} color="#00BBA9" /></div>
+                  <div className="why-ad-icon"><Icon size={22} color="#7a5c00" /></div>
                   <h3>{w.title}</h3>
                   <p>{w.desc}</p>
                 </div>
@@ -89,7 +89,7 @@ const Advertise = () => {
               const Icon = p.icon;
               return (
                 <div key={i} className="placement-card">
-                  <div className="pl-icon"><Icon size={22} color="#00BBA9" /></div>
+                  <div className="pl-icon"><Icon size={22} color="#7a5c00" /></div>
                   <h3 className="pl-title">{p.title}</h3>
                   <p className="pl-desc">{p.desc}</p>
                   <div className="pl-formats">
@@ -117,7 +117,7 @@ const Advertise = () => {
               const Icon = ind.icon;
               return (
                 <div key={i} className="industry-card">
-                  <Icon size={22} color="#00BBA9" />
+                  <Icon size={22} color="#F9C105" />
                   <span>{ind.label}</span>
                 </div>
               );
@@ -132,7 +132,7 @@ const Advertise = () => {
           <div>
             <h2 className="section-title">{advertisePage.mediaKitHeading}</h2>
             <p className="ad-form-lead">
-              Tell us your business and target city — we'll send placement options, available slots
+              Tell us your business and target routes — we'll send placement options, available slots
               and pricing within one working day.
             </p>
 
@@ -155,11 +155,11 @@ const Advertise = () => {
           <div className="ad-form-card" data-reveal>
             {submitted ? (
               <div className="ad-success">
-                <CheckCircle2 size={50} color="#00BBA9" />
+                <CheckCircle2 size={50} color="#F9C105" />
                 <h3>Enquiry Received</h3>
                 <p>
                   Thanks, <strong>{contactName || 'there'}</strong>. Our ad sales team will contact{' '}
-                  <strong>{phone}</strong> with the ZI CAB media kit.
+                  <strong>{phone}</strong> with the Ninja Truck media kit.
                 </p>
               </div>
             ) : (
@@ -172,7 +172,7 @@ const Advertise = () => {
                     id="ad-company"
                     type="text"
                     required
-                    placeholder="e.g. Grand Majestic Mall"
+                    placeholder="e.g. Shakti Cement"
                     value={company}
                     onChange={(e) => setCompany(e.target.value)}
                   />
@@ -234,7 +234,7 @@ const Advertise = () => {
                   <textarea
                     id="ad-brief"
                     rows={4}
-                    placeholder="Target city, campaign duration, budget range..."
+                    placeholder="Target routes or cities, campaign duration, budget range..."
                     value={brief}
                     onChange={(e) => setBrief(e.target.value)}
                   />
@@ -272,7 +272,7 @@ const Advertise = () => {
           .why-ad-icon {
             width: 46px;
             height: 46px;
-            background: #E6F8F6;
+            background: #FFF6D1;
             border-radius: 12px;
             display: flex;
             align-items: center;
@@ -310,7 +310,7 @@ const Advertise = () => {
           }
 
           .placement-card:hover {
-            border-color: #00BBA9;
+            border-color: #F9C105;
             transform: translateY(-5px);
             box-shadow: var(--shadow-md);
           }
@@ -318,7 +318,7 @@ const Advertise = () => {
           .pl-icon {
             width: 44px;
             height: 44px;
-            background: rgba(0, 187, 169, 0.1);
+            background: #FFF6D1;
             border-radius: 12px;
             display: flex;
             align-items: center;
@@ -357,7 +357,7 @@ const Advertise = () => {
           }
 
           .industries-section {
-            background: linear-gradient(135deg, #07152B 0%, #0B1F3A 100%);
+            background: linear-gradient(135deg, #0b0b0b 0%, #111111 100%);
           }
 
           .industries-grid {
@@ -381,7 +381,7 @@ const Advertise = () => {
           }
 
           .industry-card:hover {
-            border-color: #00BBA9;
+            border-color: #F9C105;
             transform: translateY(-3px);
           }
 
@@ -413,7 +413,7 @@ const Advertise = () => {
             gap: 3px;
             background: #F8FAFC;
             border: 1px solid #E2E8F0;
-            border-left: 3px solid #00BBA9;
+            border-left: 3px solid #F9C105;
             border-radius: 10px;
             padding: 12px 16px;
           }
@@ -431,11 +431,11 @@ const Advertise = () => {
             color: #0F172A;
           }
 
-          .ad-contact-item a:hover { color: #00BBA9; }
+          .ad-contact-item a:hover { color: #7a5c00; }
 
           .ad-form-card {
-            background: #0C1B30;
-            border: 1px solid rgba(0, 187, 169, 0.3);
+            background: #1a1a1a;
+            border: 1px solid rgba(249, 193, 5, 0.3);
             border-radius: 16px;
             padding: 32px;
             box-shadow: 0 16px 36px rgba(0, 0, 0, 0.25);
@@ -484,7 +484,7 @@ const Advertise = () => {
           }
 
           .ad-field input:focus, .ad-field select:focus, .ad-field textarea:focus {
-            border-color: #00BBA9;
+            border-color: #F9C105;
           }
 
           .ad-field input::placeholder, .ad-field textarea::placeholder {
@@ -492,7 +492,7 @@ const Advertise = () => {
           }
 
           .ad-field select option {
-            background: #0C1B30;
+            background: #1a1a1a;
           }
 
           .ad-success {

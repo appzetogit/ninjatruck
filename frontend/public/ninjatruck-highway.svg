@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 600" role="img" aria-label="Ninja Truck lorry on the highway">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1b1b1b"/>
+      <stop offset="1" stop-color="#3a2f08"/>
+    </linearGradient>
+  </defs>
+  <rect width="800" height="600" fill="url(#sky)"/>
+  <circle cx="600" cy="190" r="92" fill="#F9C105" opacity="0.9"/>
+  <path d="M0 380 L140 300 L260 350 L420 260 L580 336 L800 280 L800 420 L0 420Z" fill="#2a2a2a"/>
+  <rect y="410" width="800" height="190" fill="#111111"/>
+  <g fill="#F9C105">
+    <rect x="20" y="500" width="80" height="12"/><rect x="180" y="500" width="80" height="12"/>
+    <rect x="340" y="500" width="80" height="12"/><rect x="500" y="500" width="80" height="12"/>
+    <rect x="660" y="500" width="80" height="12"/>
+  </g>
+  <rect x="140" y="256" width="380" height="180" rx="8" fill="#F9C105" stroke="#111" stroke-width="8"/>
+  <text x="330" y="336" text-anchor="middle" font-family="'Arial Black', Outfit, Impact, sans-serif" font-weight="900" font-size="52" fill="#111" letter-spacing="-2">NINJA</text>
+  <text x="330" y="392" text-anchor="middle" font-family="'Arial Black', Outfit, Impact, sans-serif" font-weight="900" font-size="52" fill="#111" letter-spacing="-2">TRUCK</text>
+  <path d="M528 300 H620 L676 364 V436 H528Z" fill="#ffffff" stroke="#111" stroke-width="8" stroke-linejoin="round"/>
+  <path d="M552 320 H610 L648 364 H552Z" fill="#111"/>
+  <rect x="660" y="400" width="24" height="16" fill="#F9C105" stroke="#111" stroke-width="4"/>
+  <rect x="120" y="428" width="572" height="20" fill="#111"/>
+  <g>
+    <circle cx="220" cy="452" r="40" fill="#111" stroke="#F9C105" stroke-width="6"/><circle cx="220" cy="452" r="14" fill="#F9C105"/>
+    <circle cx="440" cy="452" r="40" fill="#111" stroke="#F9C105" stroke-width="6"/><circle cx="440" cy="452" r="14" fill="#F9C105"/>
+    <circle cx="612" cy="452" r="40" fill="#111" stroke="#F9C105" stroke-width="6"/><circle cx="612" cy="452" r="14" fill="#F9C105"/>
+  </g>
+  <g stroke="#F9C105" stroke-width="8" stroke-linecap="round" opacity="0.8">
+    <line x1="32" y1="300" x2="108" y2="300"/><line x1="8" y1="344" x2="108" y2="344"/><line x1="48" y1="388" x2="108" y2="388"/>
+  </g>
+</svg>

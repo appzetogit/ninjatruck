@@ -95,7 +95,7 @@ const BusHomeDesktop = ({
   }, [slides.length]);
   const visibleRoutes = showAllRoutes ? routes : routes.slice(0, ROUTES_SHOWN);
   const { settings } = useSettings();
-  const logo = settings.general?.logo || '/zicab-logo.jpg';
+  const logo = settings.general?.logo || '/ninjatruck-logo.svg';
 
   const citySelect = (value, onChange, label) => (
     <select className="zbd-input" value={value} onChange={(event) => onChange(event.target.value)} aria-label={label}>

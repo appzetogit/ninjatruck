@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 600" role="img" aria-label="Ninja Truck cargo boxes ready for pickup">
+  <rect width="800" height="600" fill="#F9C105"/>
+  <g opacity="0.18" stroke="#111" stroke-width="2">
+    <path d="M0 120 H800 M0 240 H800 M0 360 H800 M0 480 H800 M160 0 V600 M320 0 V600 M480 0 V600 M640 0 V600"/>
+  </g>
+  <rect y="500" width="800" height="100" fill="#111111"/>
+  <!-- bottom row -->
+  <g stroke="#111" stroke-width="8" stroke-linejoin="round">
+    <rect x="150" y="330" width="230" height="170" fill="#e0a85a"/>
+    <rect x="400" y="300" width="260" height="200" fill="#d39647"/>
+    <rect x="210" y="170" width="220" height="160" fill="#e8b46a"/>
+    <rect x="450" y="160" width="160" height="140" fill="#e0a85a"/>
+  </g>
+  <!-- NT tape -->
+  <g fill="#111">
+    <rect x="252" y="330" width="26" height="170"/>
+    <rect x="517" y="300" width="26" height="200"/>
+    <rect x="307" y="170" width="26" height="160"/>
+    <rect x="517" y="160" width="26" height="140"/>
+  </g>
+  <g fill="#F9C105" font-family="'Arial Black', Outfit, Impact, sans-serif" font-weight="900" font-size="16" text-anchor="middle">
+    <text x="265" y="420" transform="rotate(-90 265 420)">NINJA TRUCK</text>
+    <text x="530" y="404" transform="rotate(-90 530 404)">NINJA TRUCK</text>
+    <text x="320" y="254" transform="rotate(-90 320 254)">NINJA TRUCK</text>
+  </g>
+  <!-- labels -->
+  <g fill="#fff" stroke="#111" stroke-width="4">
+    <rect x="590" y="330" width="56" height="40"/>
+    <rect x="160" y="350" width="70" height="44"/>
+  </g>
+  <g stroke="#111" stroke-width="4">
+    <path d="M598 342 H638 M598 352 H630 M168 362 H222 M168 372 H210 M168 382 H218"/>
+  </g>
+  <!-- shield -->
+  <path d="M690 120 L740 140 V190 C740 222 718 244 690 256 C662 244 640 222 640 190 V140 Z" fill="#111"/>
+  <path d="M666 188 L684 206 L716 170" fill="none" stroke="#F9C105" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

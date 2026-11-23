@@ -16,7 +16,7 @@ const Partner = () => {
   useReveal(pageRef);
 
   const { submitted, sending, error, submit } = useEnquiryForm('partner');
-  const [vehicleType, setVehicleType] = useState('Sedan (Dzire/Etios)');
+  const [vehicleType, setVehicleType] = useState('Mini Truck (Tata Ace / Dost)');
   const [city, setCity] = useState('Bengaluru');
   const [ownerName, setOwnerName] = useState('');
   const [mobile, setMobile] = useState('');
@@ -37,7 +37,7 @@ const Partner = () => {
           <span className="page-tag">{partnerPage.tag}</span>
           <h1 className="page-title">{partnerPage.title}</h1>
           <p className="page-subtitle">
-            Attach your commercial vehicle to India's fastest growing premium cab platform and earn up to ₹90,000/month per vehicle.
+            Attach your truck to India's fast-growing logistics network and earn up to ₹1,50,000/month per vehicle with steady loads, all over India.
           </p>
         </div>
       </div>
@@ -53,7 +53,7 @@ const Partner = () => {
                 const PerkIcon = perk.icon;
                 return (
                   <div className="perk-card" key={index}>
-                    <PerkIcon size={28} color="#00BBA9" />
+                    <PerkIcon size={28} color="#7a5c00" />
                     <h4>{perk.title}</h4>
                     <p>{perk.desc}</p>
                   </div>
@@ -82,7 +82,7 @@ const Partner = () => {
 
             {submitted ? (
               <div className="form-success text-center py-6">
-                <CheckCircle2 size={50} color="#00BBA9" className="mx-auto mb-4" />
+                <CheckCircle2 size={50} color="#F9C105" className="mx-auto mb-4" />
                 <h4 className="text-xl font-bold text-white mb-2">Application Received!</h4>
                 <p className="text-gray-300 text-sm">
                   Our Fleet Onboarding officer will call <strong>{mobile}</strong> to verify your vehicle documents.
@@ -124,12 +124,12 @@ const Partner = () => {
                 </div>
 
                 <div className="input-group">
-                  <label>Vehicle Category</label>
+                  <label>Truck Category</label>
                   <select value={vehicleType} onChange={(e) => setVehicleType(e.target.value)}>
-                    <option value="Sedan (Dzire/Etios)">Sedan (Dzire / Etios)</option>
-                    <option value="MUV (Ertiga)">MUV (Ertiga / Triber)</option>
-                    <option value="SUV (Innova Crysta)">SUV (Innova Crysta)</option>
-                    <option value="Luxury (Fortuner)">Luxury (Toyota Fortuner)</option>
+                    <option value="Mini Truck (Tata Ace / Dost)">Mini Truck (Tata Ace / Dost)</option>
+                    <option value="Pickup (Bolero / Intra)">Pickup (Bolero Pickup / Intra)</option>
+                    <option value="LCV (14-17 ft)">LCV (14 - 17 ft)</option>
+                    <option value="Heavy (19 ft+ / Trailer)">Heavy Vehicle (19 ft+ / Trailer)</option>
                   </select>
                 </div>
 
@@ -182,8 +182,8 @@ const Partner = () => {
           }
 
           .earnings-box {
-            background: #07152B;
-            border: 1px solid rgba(0, 187, 169, 0.3);
+            background: #0b0b0b;
+            border: 1px solid rgba(249, 193, 5, 0.3);
             border-radius: 12px;
             padding: 20px;
             color: #FFFFFF;
@@ -192,7 +192,7 @@ const Partner = () => {
           .earnings-title {
             font-size: 16px;
             font-weight: 700;
-            color: #00BBA9;
+            color: #F9C105;
             margin-bottom: 14px;
           }
 
@@ -211,13 +211,13 @@ const Partner = () => {
           }
 
           .e-val {
-            color: #00BBA9;
+            color: #F9C105;
             font-weight: 700;
           }
 
           .partner-form-card {
-            background: #0C1B30;
-            border: 1px solid rgba(0, 187, 169, 0.3);
+            background: #1a1a1a;
+            border: 1px solid rgba(249, 193, 5, 0.3);
             border-radius: 16px;
             padding: 32px;
             color: #FFFFFF;

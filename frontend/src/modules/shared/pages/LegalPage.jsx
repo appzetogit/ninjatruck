@@ -8,11 +8,11 @@ import termsRawText from '../content/terms-content.txt?raw';
 import privacyRawText from '../content/privacy-content.txt?raw';
 
 const vehiclePricing = [
-  { type: 'Bike', capacity: 'Up to 2 riders', price: 'Starts at Rs 49', cancellationCut: 'Admin cut up to Rs 10', note: 'Best for quick solo rides and short-distance travel.' },
-  { type: 'Auto', capacity: 'Up to 3 riders', price: 'Starts at Rs 79', cancellationCut: 'Admin cut up to Rs 15', note: 'Suitable for city commutes and local market travel.' },
-  { type: 'Taxi', capacity: 'Up to 4 riders', price: 'Starts at Rs 129', cancellationCut: 'Admin cut up to Rs 25', note: 'Standard cab option for everyday point-to-point trips.' },
-  { type: 'Premium Car', capacity: 'Up to 7 riders', price: 'Starts at Rs 249', cancellationCut: 'Admin cut up to Rs 40', note: 'Extra comfort and larger seating for family or business travel.' },
-  { type: 'eRickshaw', capacity: 'Up to 3 riders', price: 'Starts at Rs 69', cancellationCut: 'Admin cut up to Rs 12', note: 'May be available in selected operating zones only.' },
+  { type: "Mini Truck", capacity: "Up to 1 tonne", price: "Shown before you book", cancellationCut: "Free before truck assignment", note: "Tata Ace, Dost and pickups for intracity loads and small cargo." },
+  { type: "Pickup / LCV", capacity: "1 - 3.5 tonnes", price: "Shown before you book", cancellationCut: "Fee may apply after assignment", note: "Shop stock, appliances, furniture and medium business loads." },
+  { type: "Heavy Vehicle", capacity: "3.5 tonnes and above", price: "Shown before you book", cancellationCut: "Fee may apply after assignment", note: "19 ft+ trucks and trailers for industrial goods and full truck loads." },
+  { type: "Intercity Freight", capacity: "Part or full load", price: "Quoted per route", cancellationCut: "Fee may apply after dispatch", note: "City-to-city freight across India with live tracking." },
+  { type: "Packers & Movers", capacity: "Home or office", price: "Quoted after survey", cancellationCut: "Per quote terms", note: "Packing, loading, transport and unloading for shifting." },
 ];
 
 const legalContent = {
@@ -21,7 +21,7 @@ const legalContent = {
     title: 'Terms & Conditions',
     icon: ScrollText,
     intro:
-      'These terms apply to everyone who uses ZI CAB - riders booking rides and parcel deliveries, and drivers and vehicle owners providing them.',
+      'These terms apply to everyone who uses Ninja Truck - customers booking trucks and parcel deliveries, and drivers and truck owners providing them.',
     rawText: termsRawText,
   },
   privacy: {
@@ -29,7 +29,7 @@ const legalContent = {
     title: 'Privacy Policy',
     icon: ShieldCheck,
     intro:
-      'How ZI CAB collects, uses, shares, stores and protects the information of riders, drivers and website visitors.',
+      'How Ninja Truck collects, uses, shares, stores and protects the information of customers, drivers, truck owners and website visitors.',
     rawText: privacyRawText,
   },
   refund: {
@@ -37,7 +37,7 @@ const legalContent = {
     title: 'Refund & Cancellation Policy',
     icon: ReceiptText,
     intro:
-      'This page explains refund eligibility, cancellation timelines, and indicative prices for the main vehicle types available on the Zicab Group Private Limited platform. Refunds are reviewed based on service status, time of cancellation, and payment mode.',
+      'This page explains refund eligibility, cancellation timelines, and indicative prices for the main vehicle types available on the Ninja Truck Logistics platform. Refunds are reviewed based on service status, time of cancellation, and payment mode.',
     sections: [
       {
         title: 'When refunds may be approved',
@@ -51,14 +51,14 @@ const legalContent = {
       {
         title: 'Refund policy overview',
         body:
-          'Zicab Group Private Limited reviews refund requests on a case-by-case basis to confirm whether the booking was completed, cancelled before service, cancelled after dispatch, or affected by a technical or payment issue. Approved refunds are returned only after internal verification of ride logs, payment status, and service records.',
+          'Ninja Truck Logistics reviews refund requests on a case-by-case basis to confirm whether the booking was completed, cancelled before service, cancelled after dispatch, or affected by a technical or payment issue. Approved refunds are returned only after internal verification of trip logs, payment status, and service records.',
       },
       {
         title: 'Cancellation rules',
         bullets: [
-          'Bike and Auto bookings: free cancellation usually applies before partner assignment or within a short grace window after booking.',
-          'Taxi bookings: a cancellation fee may apply once a driver is assigned, the driver is close to pickup, or the vehicle has already started toward the user.',
-          'Premium Car bookings: because these block a larger-capacity vehicle, late cancellation may attract a higher convenience or blocking fee.',
+          'Mini Truck bookings: free cancellation usually applies before a truck is assigned or within a short grace window after booking.',
+          'Pickup, LCV and heavy vehicle bookings: a cancellation fee may apply once a truck is assigned, the driver is close to pickup, or the truck has already started toward the pickup point.',
+          'Intercity freight and packers & movers bookings: because these block a truck and crew for longer, late cancellation may attract a higher blocking fee as set out in the quote.',
           'Parcel or service-center linked vehicle bookings: once pickup, dispatch, or service preparation begins, the booking may become partially refundable or non-refundable.',
           'No-show cases, repeated misuse, or cancellations after service start are generally non-refundable.',
         ],
@@ -100,7 +100,7 @@ const legalContent = {
         bullets: [
           'Raise the issue through the support team with your booking ID, payment details, and reason for the request.',
           'Submit the request as early as possible after the cancelled or affected booking.',
-          'Zicab Group Private Limited may ask for screenshots, transaction references, or additional verification before approval.',
+          'Ninja Truck Logistics may ask for screenshots, transaction references, or additional verification before approval.',
         ],
       },
       {
@@ -119,7 +119,7 @@ const legalContent = {
     title: 'Cancellation Policy',
     icon: Scale,
     intro:
-      'This page summarizes how cancellations are handled across Zicab Group Private Limited booking categories.',
+      'This page summarizes how cancellations are handled across Ninja Truck Logistics booking categories.',
     sections: [
       {
         title: 'General policy',
@@ -138,20 +138,20 @@ const legalContent = {
     title: 'Delete Your Account and Data',
     icon: Trash2,
     intro:
-      'You can ask ZI CAB to delete your account and the personal information linked to it at any time. This applies to riders, drivers, vehicle owners and bus partners.',
+      'You can ask Ninja Truck to delete your account and the personal information linked to it at any time. This applies to customers, drivers and truck owners.',
     sections: [
       {
         title: 'Delete from the app',
         bullets: [
-          'Riders: open the ZI CAB app, go to Profile, tap Delete Account and confirm.',
-          'Drivers and vehicle owners: open the ZI CAB Driver app or your partner panel on zicab.in, go to your profile and choose Delete Account.',
+          'Customers: open the Ninja Truck app, go to Profile, tap Delete Account and confirm.',
+          'Drivers and vehicle owners: open the Ninja Truck Driver app or your partner panel on ninjatruck.live, go to your profile and choose Delete Account.',
         ],
       },
       {
         title: 'Or ask us to delete it',
         bullets: [
-          'Email zicabofficial@gmail.com from any address, with the subject "Delete my account" and your registered mobile number.',
-          'Or call +91 8904343123 from your registered mobile number.',
+          'Email support@ninjatruck.in from any address, with the subject "Delete my account" and your registered mobile number.',
+          'Or call +91 8942852470 from your registered mobile number.',
           'We confirm the request with you and respond within 30 days.',
         ],
       },
@@ -161,7 +161,7 @@ const legalContent = {
           'Your profile, contact details, saved places and app login are removed.',
           'Trip, payment and tax records are kept only for the period the law requires, and for resolving disputes and preventing fraud.',
           'Driver verification documents are kept for the period required by law after the account is closed.',
-          'If you signed in with Facebook, deleting your ZI CAB account also removes the information we received from Facebook.',
+          'If you signed in with Facebook, deleting your Ninja Truck account also removes the information we received from Facebook.',
         ],
       },
     ],

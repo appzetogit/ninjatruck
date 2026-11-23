@@ -5,13 +5,13 @@ import { useSupportInfo } from '../content/supportInfo';
 import { FaqList, OwnerContactCard } from '../components/OwnerContactCard';
 
 const RIDER_FAQ = [
-  { q: 'How do I book a ride?', a: 'Open the ZI CAB app, enter your drop location, choose a vehicle type and tap Book. You will see the fare before you confirm, and the driver\'s name, photo, vehicle number and live location once a driver accepts.' },
-  { q: 'What is the ride OTP?', a: 'Every trip has a 4-digit OTP shown in your app. Share it with the driver only after you are inside the right vehicle - the trip cannot start without it. ZI CAB will never call you to ask for an OTP.' },
-  { q: 'Can I raise my fare to find a driver faster?', a: 'Yes. If no driver has accepted, the app lets you add a small amount to your fare. Drivers nearby see the new fare immediately. You always see the final amount before adding it.' },
-  { q: 'How do I cancel a ride, and is there a charge?', a: 'Tap Cancel on the trip screen. Cancelling soon after booking is free; a small cancellation fee may apply if the driver has already arrived or waited for you. The fee, if any, is shown before you confirm.' },
-  { q: 'I left something in the vehicle. What should I do?', a: 'Call or WhatsApp +91 8904343123 with your trip date and pickup location. Our team will contact the driver and help arrange its return.' },
-  { q: 'How do refunds work?', a: 'If you were charged incorrectly or paid for a trip that did not happen, contact support with the trip details. Approved refunds go back to your original payment method or ZI CAB wallet within 5-7 working days.' },
-  { q: 'How do I delete my account?', a: 'Email zicabofficial@gmail.com or call +91 8904343123 from your registered mobile number and ask for account deletion. We complete it within 30 days, as described in our Privacy Policy.' },
+  { q: 'How do I book a truck?', a: 'Open Ninja Truck, enter your pickup and drop locations, choose the truck that fits your load and tap Book. You see the price before you confirm, and the driver\x27s name, photo and truck number once a driver accepts.' },
+  { q: 'What is the trip OTP?', a: 'Every booking has a 4-digit OTP in your app. Share it with the driver only once the right truck has arrived for loading - the trip cannot start without it.' },
+  { q: 'Can I raise my price to find a truck faster?', a: 'Yes. If no driver has accepted, the app lets you add a small amount to your price. Drivers nearby see the new price immediately.' },
+  { q: 'How do I cancel a booking, and is there a charge?', a: 'Tap Cancel on the booking screen. Cancelling soon after booking is free; a small fee may apply once the truck has been assigned or has arrived. See our Refund Policy for details.' },
+  { q: 'Something is missing or damaged in my shipment. What should I do?', a: 'Call or WhatsApp +91 8942852470 with your booking date and pickup location. Our team will check with the driver and, for insured loads, start a claim.' },
+  { q: 'How do refunds work?', a: 'If you were charged incorrectly or paid for a trip that did not happen, contact support with the trip details. Approved refunds go back to your original payment method or Ninja Truck wallet within 5-7 working days.' },
+  { q: 'How do I delete my account?', a: 'Email support@ninjatruck.in or call +91 8942852470 from your registered mobile number and ask for account deletion. We complete it within 30 days, as described in our Privacy Policy.' },
 ];
 
 const SupportPage = () => {
@@ -23,7 +23,7 @@ const SupportPage = () => {
       title: 'Client care number',
       value: SUPPORT_INFO.phone,
       href: `tel:${SUPPORT_INFO.phoneHref}`,
-      helper: 'Call for booking, ride, parcel, or account help',
+      helper: 'Call for booking, shipment, parcel, or account help',
       Icon: Phone,
     },
     {
@@ -82,7 +82,7 @@ const SupportPage = () => {
             Talk to <span className="text-[#f4b400]">Support</span>
           </h1>
           <p className="mt-6 max-w-3xl text-lg leading-relaxed text-stone-300">
-            Reach the client support team for ride issues, parcel help, payment questions, account updates,
+            Reach the client support team for booking issues, shipment and parcel help, payment questions, account updates,
             or business follow-ups.
           </p>
 

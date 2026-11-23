@@ -15,10 +15,10 @@ import useLandingContent from '../../landing/useLandingContent';
  */
 
 const STATIC_DETAILS = {
-  companyName: 'Zicab Group Private Limited',
+  companyName: 'Ninja Truck Logistics',
   supportLabel: '24x7 customer support',
   responseTime: 'Replies typically within 2 hours',
-  serviceArea: 'Taxi rides, parcels, bookings, payments, and account help',
+  serviceArea: 'Truck bookings, shipments, payments, and account help',
   availability: 'Available every day, all day',
 };
 

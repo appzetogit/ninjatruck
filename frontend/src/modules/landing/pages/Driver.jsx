@@ -39,7 +39,7 @@ const Driver = () => {
           <span className="page-tag">{driverPage.tag}</span>
           <h1 className="page-title">{driverPage.title}</h1>
           <p className="page-subtitle">
-            Become a ZI CAB Driver Partner. Enjoy daily/weekly settlements, zero arbitrary account blocks, and dedicated support for captains.
+            Drive with Ninja Truck or attach your truck. Steady loads across India, weekly payouts and a support team that picks up.
           </p>
         </div>
       </div>
@@ -55,7 +55,7 @@ const Driver = () => {
                 const PerkIcon = perk.icon;
                 return (
                   <div className="d-perk" key={index}>
-                    <PerkIcon size={24} color="#00BBA9" />
+                    <PerkIcon size={24} color="#7a5c00" />
                     <div>
                       <h4>{perk.title}</h4>
                       <p>{perk.desc}</p>
@@ -66,11 +66,11 @@ const Driver = () => {
             </div>
 
             <div className="docs-box mt-8">
-              <h3 className="docs-title"><FileText size={18} color="#00BBA9" /> Documents Required for Verification</h3>
+              <h3 className="docs-title"><FileText size={18} color="#F9C105" /> Documents Required for Verification</h3>
               <div className="docs-list">
                 {requiredDocs.map((doc, idx) => (
                   <div key={idx} className="doc-item">
-                    <CheckCircle2 size={16} color="#00BBA9" />
+                    <CheckCircle2 size={16} color="#F9C105" />
                     <span>{doc}</span>
                   </div>
                 ))}
@@ -85,16 +85,16 @@ const Driver = () => {
 
             {submitted ? (
               <div className="form-success text-center py-6">
-                <CheckCircle2 size={50} color="#00BBA9" className="mx-auto mb-4" />
+                <CheckCircle2 size={50} color="#F9C105" className="mx-auto mb-4" />
                 <h4 className="text-xl font-bold text-white mb-2">Registration Submitted!</h4>
                 <p className="text-gray-300 text-sm">
-                  Our Driver Onboarding Center will call <strong>{phone}</strong> to schedule document verification.
+                  Our Partner Onboarding team will call <strong>{phone}</strong> to schedule document verification.
                 </p>
               </div>
             ) : (
               <form onSubmit={handleSubmit} className="c-form">
                 <div className="input-group">
-                  <label>Full Driver Name</label>
+                  <label>Driver / Owner Name</label>
                   <input 
                     type="text" 
                     required 
@@ -116,16 +116,22 @@ const Driver = () => {
                 </div>
 
                 <div className="input-group">
-                  <label>Current Operating City</label>
+                  <label>Base City</label>
                   <select value={city} onChange={(e) => setCity(e.target.value)}>
                     <option value="Bengaluru">Bengaluru</option>
                     <option value="Mangaluru">Mangaluru</option>
                     <option value="Hubballi">Hubballi</option>
+                    <option value="Delhi NCR">Delhi NCR</option>
+                    <option value="Mumbai">Mumbai</option>
+                    <option value="Pune">Pune</option>
+                    <option value="Hyderabad">Hyderabad</option>
+                    <option value="Chennai">Chennai</option>
+                    <option value="Other">Other City</option>
                   </select>
                 </div>
 
                 <div className="input-group">
-                  <label>Driving Experience</label>
+                  <label>Truck Driving Experience</label>
                   <select value={experience} onChange={(e) => setExperience(e.target.value)}>
                     <option value="1-3 Years">1 - 3 Years</option>
                     <option value="3-5 Years">3 - 5 Years</option>
@@ -137,7 +143,7 @@ const Driver = () => {
                   <p style={{ color: '#e11d48', fontSize: '0.85rem', marginBottom: '0.75rem' }}>{error}</p>
                 )}
                 <button type="submit" className="btn btn-teal w-full mt-4" disabled={sending}>
-                  {sending ? 'Sending\u2026' : 'Register as Driver Captain'} </button>
+                  {sending ? 'Sending\u2026' : 'Register My Truck'} </button>
               </form>
             )}
           </div>
@@ -183,8 +189,8 @@ const Driver = () => {
           }
 
           .docs-box {
-            background: #07152B;
-            border: 1px solid rgba(0, 187, 169, 0.3);
+            background: #0b0b0b;
+            border: 1px solid rgba(249, 193, 5, 0.3);
             border-radius: 12px;
             padding: 20px;
             color: #FFFFFF;
@@ -193,7 +199,7 @@ const Driver = () => {
           .docs-title {
             font-size: 16px;
             font-weight: 700;
-            color: #00BBA9;
+            color: #F9C105;
             margin-bottom: 14px;
             display: flex;
             align-items: center;
@@ -215,8 +221,8 @@ const Driver = () => {
           }
 
           .driver-form-card {
-            background: #0C1B30;
-            border: 1px solid rgba(0, 187, 169, 0.3);
+            background: #1a1a1a;
+            border: 1px solid rgba(249, 193, 5, 0.3);
             border-radius: 16px;
             padding: 32px;
             color: #FFFFFF;

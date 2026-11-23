@@ -9,12 +9,12 @@ const FaqPage = () => {
   const [openIndex, setOpenIndex] = useState(0);
 
   const faqs = [
-    { q: "How do I book a ride?", a: "You can book a ride by logging into our app, entering your pickup and drop-off locations, selecting your vehicle type, and confirming the ride." },
-    { q: "Are your drivers verified?", a: "Yes, all our drivers undergo a strict background check, vehicle inspection, and training before they start driving with us." },
-    { q: "How does parcel delivery work?", a: "You can select the Parcel Delivery option, enter the recipient details, and a delivery partner will pick up the package from your location." },
-    { q: "What payment methods do you accept?", a: "We accept credit/debit cards, mobile wallets, and cash payments for your convenience." },
-    { q: "Can I schedule a ride in advance?", a: "Absolutely. Our 'Later' feature allows you to schedule a ride hours or even days in advance so you never miss an important appointment." },
-    { q: "How is the pricing calculated?", a: "Fares are calculated based on base fare, distance, estimated time, and current demand. You'll always see an estimated price before you confirm the booking." }
+    { q: "How do I book a truck?", a: "Log in to Ninja Truck, enter your pickup and drop locations, choose the truck that fits your load, and confirm. Booking takes under 60 seconds." },
+    { q: "Are your drivers verified?", a: "Yes. Every driver and truck owner goes through document checks, licence verification and a vehicle inspection before they take a load." },
+    { q: "How does courier and parcel delivery work?", a: "Choose Courier, enter the receiver's details, and a Ninja Truck partner picks the package up from your doorstep and delivers it with live tracking." },
+    { q: "Are my goods insured?", a: "Goods insurance is available on every booking, so your cargo is covered while it is on the road." },
+    { q: "Can I book a truck in advance?", a: "Yes. Schedule a pickup for later - hours or days ahead - for shifting, planned dispatches or recurring business loads." },
+    { q: "How is the price calculated?", a: "Prices depend on the truck type, distance, load and any loading help or waiting time. You always see the price before you confirm." }
   ];
 
   return (

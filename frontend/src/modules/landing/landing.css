@@ -1,4 +1,4 @@
-/* ZI CAB landing styles.
+/* Ninja Truck landing styles (palette: yellow #F9C105, ink #111111).
 
    Everything below is nested under `.zicab-landing` so it cannot reach the taxi
    app: both sides use generic class names (`container`, `btn`, `section-title`)
@@ -9,22 +9,22 @@
    by the booking modal, which renders outside the landing subtree. */
 
 :root {
-  --primary-navy: #0B1F3A;
-  --navy-dark: #07152B;
-  --navy-card: #0C1B30;
+  --primary-navy: #111111;
+  --navy-dark: #0b0b0b;
+  --navy-card: #1a1a1a;
   /* one step deeper than navy-dark, for the recessed bands */
-  --navy-deep: #050F20;
+  --navy-deep: #060606;
 
-  --primary-teal: #00BBA9;
-  --teal-hover: #00a394;
-  --teal-light: rgba(0, 187, 169, 0.12);
-  --teal-bright: #46E3D2;
-  --teal-ink: #04645C;
+  --primary-teal: #F9C105;
+  --teal-hover: #e6b204;
+  --teal-light: rgba(249, 193, 5, 0.12);
+  --teal-bright: #FFD84D;
+  --teal-ink: #7a5c00;
 
   /* Warm off-white instead of #FFF for large fields — pure white next to a
      saturated teal reads cheap and glares on an OLED phone. */
-  --bg-light: #F1F3F7;
-  --bg-white: #FBFBFC;
+  --bg-light: #FFF8E1;
+  --bg-white: #FFFDF5;
   --bg-raised: #FFFFFF;
 
   --text-dark: #0B1220;
@@ -36,15 +36,15 @@
   --border-light: #E4E8EF;
   --border-dark: #1E293B;
 
-  --font-main: 'Poppins', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  --font-display: 'Sora', 'Poppins', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-main: 'Outfit', 'Poppins', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-display: 'Outfit', 'Poppins', -apple-system, BlinkMacSystemFont, sans-serif;
 
   /* Layered shadows with a hairline top highlight, so surfaces read as material
      rather than as a rectangle with a grey outline. */
   --shadow-sm: 0 1px 2px rgba(11, 18, 32, 0.04), 0 4px 12px rgba(11, 18, 32, 0.045);
   --shadow-md: 0 2px 4px rgba(11, 18, 32, 0.045), 0 12px 28px rgba(11, 18, 32, 0.07);
   --shadow-lg: 0 4px 8px rgba(11, 18, 32, 0.05), 0 24px 54px rgba(11, 18, 32, 0.1);
-  --shadow-teal: 0 6px 14px rgba(0, 187, 169, 0.28), 0 18px 40px rgba(0, 187, 169, 0.18);
+  --shadow-teal: 0 6px 14px rgba(249, 193, 5, 0.28), 0 18px 40px rgba(249, 193, 5, 0.18);
   --hairline: inset 0 1px 0 rgba(255, 255, 255, 0.85);
   --hairline-dark: inset 0 1px 0 rgba(255, 255, 255, 0.06);
 
@@ -143,10 +143,10 @@
     width: 8px;
   }
   ::-webkit-scrollbar-track {
-    background: #0B1F3A;
+    background: #111111;
   }
   ::-webkit-scrollbar-thumb {
-    background: #00BBA9;
+    background: #F9C105;
     border-radius: 4px;
   }
 
@@ -269,9 +269,9 @@
     overflow: hidden;
     background-color: var(--navy-deep);
     background-image:
-      radial-gradient(110% 130% at 12% -10%, rgba(0, 187, 169, 0.22) 0%, transparent 52%),
-      radial-gradient(90% 120% at 88% 0%, rgba(43, 92, 168, 0.28) 0%, transparent 55%),
-      linear-gradient(160deg, #08182F 0%, #0B1F3A 55%, #071328 100%);
+      radial-gradient(110% 130% at 12% -10%, rgba(249, 193, 5, 0.22) 0%, transparent 52%),
+      radial-gradient(90% 120% at 88% 0%, rgba(230, 178, 4, 0.28) 0%, transparent 55%),
+      linear-gradient(160deg, #141414 0%, #111111 55%, #0a0a0a 100%);
     border-bottom: 1px solid rgba(255, 255, 255, 0.07);
   }
 
@@ -288,7 +288,7 @@
 
   .page-hero .page-tag {
     backdrop-filter: blur(6px);
-    border: 1px solid rgba(0, 187, 169, 0.3);
+    border: 1px solid rgba(249, 193, 5, 0.3);
   }
 
   .page-tag {
@@ -410,15 +410,15 @@
   }
 
   .btn-teal {
-    background-image: linear-gradient(180deg, #14CDBA 0%, var(--primary-teal) 48%, #009C8D 100%);
-    color: var(--text-white);
+    background-image: linear-gradient(180deg, #FFD23F 0%, var(--primary-teal) 48%, #e6b204 100%);
+    color: #111111;
     box-shadow: var(--shadow-teal), inset 0 1px 0 rgba(255, 255, 255, 0.34),
       inset 0 -1px 0 rgba(0, 0, 0, 0.12);
   }
 
   .btn-teal:hover {
     transform: translateY(-2px);
-    box-shadow: 0 10px 20px rgba(0, 187, 169, 0.34), 0 26px 52px rgba(0, 187, 169, 0.22),
+    box-shadow: 0 10px 20px rgba(249, 193, 5, 0.34), 0 26px 52px rgba(249, 193, 5, 0.22),
       inset 0 1px 0 rgba(255, 255, 255, 0.4);
   }
 
@@ -432,7 +432,7 @@
 
   .btn-outline-light:hover {
     background: rgba(255, 255, 255, 0.13);
-    border-color: rgba(0, 187, 169, 0.65);
+    border-color: rgba(249, 193, 5, 0.65);
     color: #FFFFFF;
     transform: translateY(-2px);
   }
@@ -491,7 +491,7 @@
   .input-group input:focus,
   .input-group select:focus {
     border-color: var(--primary-teal);
-    box-shadow: 0 0 0 2px rgba(0, 187, 169, 0.2);
+    box-shadow: 0 0 0 2px rgba(249, 193, 5, 0.2);
   }
 
   .input-group select option {
@@ -712,7 +712,7 @@
       width: 100%;
       z-index: 1100;
       transform-origin: 0 50%;
-      background: linear-gradient(90deg, var(--primary-teal), #6ee7db);
+      background: linear-gradient(90deg, var(--primary-teal), #FFE27A);
       animation: zc-scrollProgress linear;
       animation-timeline: scroll(root block);
     }
@@ -802,7 +802,7 @@
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
-    background: rgba(0, 187, 169, 0.15);
+    background: rgba(249, 193, 5, 0.15);
     color: var(--primary-teal);
     font-weight: 700;
     letter-spacing: 0.5px;

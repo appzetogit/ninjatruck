@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Ninja Truck">
+  <rect width="512" height="512" rx="96" fill="#111111"/>
+  <rect x="24" y="24" width="464" height="464" rx="76" fill="none" stroke="#F9C105" stroke-width="12"/>
+  <!-- cargo box -->
+  <rect x="78" y="150" width="236" height="150" rx="10" fill="#F9C105"/>
+  <text x="196" y="250" text-anchor="middle" font-family="'Arial Black', 'Outfit', Impact, sans-serif" font-weight="900" font-size="104" letter-spacing="-4" fill="#111111">NT</text>
+  <!-- cab -->
+  <path d="M322 186 H378 L430 244 V300 H322 Z" fill="#ffffff"/>
+  <path d="M340 204 H372 L404 244 H340 Z" fill="#111111"/>
+  <rect x="70" y="296" width="370" height="18" rx="4" fill="#F9C105"/>
+  <!-- wheels -->
+  <circle cx="146" cy="330" r="34" fill="#111111" stroke="#F9C105" stroke-width="10"/>
+  <circle cx="372" cy="330" r="34" fill="#111111" stroke="#F9C105" stroke-width="10"/>
+  <!-- speed lines -->
+  <g stroke="#F9C105" stroke-width="12" stroke-linecap="round">
+    <line x1="40" y1="182" x2="62" y2="182"/>
+    <line x1="30" y1="226" x2="62" y2="226"/>
+  </g>
+  <text x="256" y="430" text-anchor="middle" font-family="'Arial Black', 'Outfit', Impact, sans-serif" font-weight="900" font-size="58" letter-spacing="2" fill="#F9C105">NINJA TRUCK</text>
+</svg>

@@ -20,10 +20,19 @@ Live on `ninjatruck.live` (same server, 145.223.21.188):
 |---|---|
 | `nginx/ninjatruck.live.conf` | `/etc/nginx/sites-available/ninjatruck.live.conf` (symlinked into `sites-enabled`) |
 
-Static build only, served from `/var/www/ninjatruck`; it calls the backend at
-`zicab.in`. To redeploy, build with the server's public `VITE_*` values from
-`/opt/zicab/frontend/.env.production`, then replace `/var/www/ninjatruck` with
-the new `dist/`.
+Its own stack, separate from ZI CAB:
+
+- Frontend: static build in `/var/www/ninjatruck`. Build with the public
+  `VITE_*` values from `/opt/zicab/frontend/.env.production`, but with
+  `VITE_API_BASE_URL=https://ninjatruck.live/api/v1` and
+  `VITE_BACKEND_ORIGIN` / `VITE_SOCKET_URL` set to `https://ninjatruck.live`,
+  then swap the new `dist/` in for `/var/www/ninjatruck`.
+- Backend: this repo's `Backend/` at `/opt/ninjatruck/Backend`, pm2 app
+  `ninjatruck-api` on 127.0.0.1:5016, MongoDB database `ninjatruck`, Redis off
+  (single instance). nginx proxies `/api`, `/socket.io`, `/uploads`, `/health`.
+- Branding lives in that database. `node scripts/seedNinjaTruckBrand.js`
+  (re)applies the name, logo, contacts and website content, then
+  `pm2 restart ninjatruck-api`. It refuses to run against a ZI CAB database.
 
 ## Frontend deploys
 
