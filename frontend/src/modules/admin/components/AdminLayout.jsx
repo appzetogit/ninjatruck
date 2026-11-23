@@ -290,7 +290,7 @@ const SidebarItem = ({ icon, label, path, isCollapsed, sidebarTextColor, unreadC
     to={path}
     end
     className={({ isActive }) =>
-      `group relative flex items-center gap-3.5 px-4 py-2 rounded-xl transition-all duration-200 ${isActive ? 'text-[#05070D] bg-[#FFC400]' : 'hover:bg-amber-100/50 hover:text-slate-900'
+      `group relative flex items-center gap-3.5 px-4 py-2 rounded-xl transition-all duration-200 ${isActive ? 'text-[#05070D] bg-[#FFC400]' : 'hover:bg-white/10 hover:!text-white'
       }`
     }
     style={({ isActive }) => ({
@@ -416,7 +416,7 @@ const SidebarGroup = ({
                     to={item.path}
                     end
                     className={({ isActive: childActive }) =>
-                      `group flex items-center gap-3 px-3 py-1.5 rounded-lg text-[12.5px] transition-all duration-200 ${childActive ? 'text-[#05070D] bg-[#FFC400]' : 'hover:text-slate-900 hover:bg-amber-100/50'
+                      `group flex items-center gap-3 px-3 py-1.5 rounded-lg text-[12.5px] transition-all duration-200 ${childActive ? 'text-[#05070D] bg-[#FFC400]' : 'hover:!text-white hover:bg-white/10'
                       }`
                     }
                     style={({ isActive: childActive }) => ({
@@ -514,7 +514,7 @@ const NestedGroup = ({
                   to={item.path}
                   end
                   className={({ isActive: childActive }) =>
-                    `group flex items-center gap-3 px-3 py-1.5 rounded-lg text-[12px] transition-all duration-200 ${childActive ? 'text-[#05070D]' : 'hover:text-slate-900 hover:bg-amber-100/50'
+                    `group flex items-center gap-3 px-3 py-1.5 rounded-lg text-[12px] transition-all duration-200 ${childActive ? 'text-[#05070D]' : 'hover:!text-white hover:bg-white/10'
                     }`
                   }
                   style={({ isActive: childActive }) => ({
@@ -669,7 +669,8 @@ const AdminLayout = () => {
   const isOwnerBookingsRoute = pathMatches(location.pathname, '/admin/owners/bookings');
   const mode = isOwnerRoute ? OWNER_MODE : ADMIN_MODE;
 
-  const appName = settings.general?.app_name || 'App';
+  // The CMS name carries a tagline ("Ninja Truck — All Over India Logistics"); the sidebar shows the brand part.
+  const appName = String(settings.general?.app_name || 'Ninja Truck').split(/\s+[—-]\s+/)[0];
   
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -1298,17 +1299,20 @@ const AdminLayout = () => {
           } ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'}`}
       >
         <div className="flex h-full flex-col">
-          <div className="group/sidebar-head relative mb-2 flex h-14 items-center border-b border-amber-200/50 px-5">
+          {/* adminTheme.css forces the sidebar to near-black, so the brand block
+              is styled for a dark background. A div, not an h3: the admin h3
+              rule would repaint the name in dark text. */}
+          <div className="group/sidebar-head relative mb-2 flex h-14 items-center border-b border-white/10 px-5">
             <div className="flex items-center gap-3">
               <div className="relative">
-                <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-amber-200 bg-amber-100 p-1.5 transition-all duration-300 group-hover/sidebar-head:scale-105 shadow-sm">
+                <div className="flex h-10 w-10 items-center justify-center overflow-hidden rounded-xl border-2 border-[#F9C105] bg-[#111111] transition-all duration-300 group-hover/sidebar-head:scale-105">
                   {settings.general?.logo || settings.customization?.logo ? (
                     <img src={settings.general?.logo || settings.customization?.logo} alt={appName} className="h-full w-full object-contain" />
                   ) : (
-                    <Zap size={20} className="text-amber-600 fill-amber-600" />
+                    <Zap size={20} className="text-[#F9C105] fill-[#F9C105]" />
                   )}
                 </div>
-                <div className="absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full bg-emerald-500 ring-2 ring-indigo-900" />
+                <div className="absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full bg-emerald-500 ring-2 ring-[#05070D]" />
               </div>
               {!isCollapsed && (
                 <motion.div
@@ -1316,12 +1320,12 @@ const AdminLayout = () => {
                   animate={{ opacity: 1, x: 0 }}
                   className="flex flex-col"
                 >
-                  <h3 className="text-sm font-bold leading-tight text-slate-900 tracking-tight">
-                    {mode === OWNER_MODE ? 'Owner Panel' : appName || 'APPZETO'}
-                  </h3>
+                  <div className="nt-display text-[15px] font-black uppercase leading-tight tracking-tight text-white">
+                    {mode === OWNER_MODE ? 'Owner Panel' : appName || 'Ninja Truck'}
+                  </div>
                   <div className="mt-0.5 flex items-center gap-1.5">
-                    <span className="text-[9px] font-bold uppercase tracking-wider text-slate-500">
-                      {mode === OWNER_MODE ? 'Fleet Console' : 'System Hub'}
+                    <span className="text-[9px] font-black uppercase tracking-[0.2em] text-[#F9C105]">
+                      {mode === OWNER_MODE ? 'Fleet Console' : 'Admin'}
                     </span>
                   </div>
                 </motion.div>
@@ -1715,7 +1719,7 @@ const AdminLayout = () => {
                   >
                     <div className="px-3 py-2 border-b border-slate-100 mb-1 bg-slate-50/50 rounded-t-lg">
                       <p className="text-[10px] font-semibold text-slate-500 mb-0.5">Account</p>
-                      <p className="text-[12px] font-medium text-slate-900 truncate">{adminProfile?.email || 'root@Appzeto .cloud'}</p>
+                      <p className="text-[12px] font-medium text-slate-900 truncate">{adminProfile?.email || 'Admin'}</p>
                     </div>
 
                     <div className="p-1 space-y-0.5">

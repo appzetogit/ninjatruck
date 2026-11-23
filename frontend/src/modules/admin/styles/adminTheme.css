@@ -62,6 +62,13 @@
   font-family: var(--font-body) !important;
 }
 
+/* Ninja Truck display type (headings and big numbers on the dashboard). Two
+   classes deep so it out-ranks the Inter rule above. */
+.redigo-admin-root .nt-display {
+  font-family: 'Outfit', system-ui, sans-serif !important;
+  letter-spacing: -0.01em;
+}
+
 /* Base size on the root only. This used to be `font-size: 16px !important` on
    every descendant, which forced body copy, table cells, labels and captions to
    one size and erased the hierarchy — every heading then had to fight it back
@@ -678,4 +685,27 @@
 }
 .redigo-admin-root td {
   border-color: #f1f5f9 !important;
+}
+
+/* Ninja Truck dashboard (.nt-dash). The generic heading/paragraph rules above
+   pin every h1-h6 and p to fixed sizes with !important, which would flatten the
+   dashboard's type scale. Inside .nt-dash those properties fall back to the
+   Tailwind utilities on each element (revert-layer reverts to the layered
+   Tailwind styles), so the markup decides. */
+.redigo-admin-root.redigo-admin-root .nt-dash :is(h1, h2, h3, h4, h5, h6, p, span, li) {
+  font-size: revert-layer !important;
+  font-weight: revert-layer !important;
+  letter-spacing: revert-layer !important;
+  text-transform: revert-layer !important;
+  line-height: revert-layer !important;
+  color: revert-layer !important;
+  padding-left: revert-layer !important;
+  margin-bottom: revert-layer !important;
+  position: revert-layer !important;
+  white-space: revert-layer !important;
+  overflow: revert-layer !important;
+  text-overflow: revert-layer !important;
+}
+.redigo-admin-root .nt-dash :is(h1, h2, h3, h4, h5, h6)::before {
+  content: none !important;
 }

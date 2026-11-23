@@ -1,55 +1,89 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
-  ArrowDownRight,
-  ArrowUpRight,
-  Bell,
-  Car,
+  Activity,
+  AlertTriangle,
+  ArrowRight,
+  Award,
+  Building2,
   CircleAlert,
   Clock,
-  CreditCard,
-  History,
-  IndianRupee,
-  Search,
-  ShieldCheck,
-  UserCheck,
-  UserPlus,
-  Users,
-  Wallet,
-  Activity,
-  ChevronRight,
-  ArrowRight,
-  Zap,
-  TrendingUp,
-  BarChart3,
-  RefreshCw,
-  Server,
-  Database,
   Cpu,
-  Mail,
-  MessageSquare,
-  MapPin,
-  Map,
-  Shield,
+  Database,
   FileText,
-  AlertTriangle,
-  Award,
-  Sparkles,
-  Play,
-  CheckCircle,
-  Eye,
-  Info,
-  Building2,
-  Loader2
+  IndianRupee,
+  Loader2,
+  Map,
+  MapPin,
+  RefreshCw,
+  Route,
+  Server,
+  Shield,
+  Tags,
+  TrendingUp,
+  Truck,
+  UserCheck,
+  Users,
+  Wifi,
 } from 'lucide-react';
-import { motion, AnimatePresence } from 'framer-motion';
 import { GoogleMap, MarkerF } from '@react-google-maps/api';
 import { adminService } from '../../services/adminService';
 import { BACKEND_LABEL } from '../../../../shared/api/runtimeConfig';
-import { GOOGLE_MAPS_API_KEY, HAS_VALID_GOOGLE_MAPS_KEY, INDIA_CENTER, useBaseGoogleMapsLoader } from '../../utils/googleMaps';
+import { INDIA_CENTER, useBaseGoogleMapsLoader } from '../../utils/googleMaps';
+
+/**
+ * Admin home - Ninja Truck operations console.
+ *
+ * Brand: ink #111111, yellow #F9C105, hard offset shadows, Outfit display type
+ * (`nt-display`, see adminTheme.css). All data comes from
+ * adminService.getDashboardData and refreshes every minute.
+ */
 
 const currency = (value) => Number(value || 0).toLocaleString('en-IN', { minimumFractionDigits: 0 });
 const DASHBOARD_REFRESH_INTERVAL_MS = 60000;
+
+const INK = '#111111';
+const YELLOW = '#F9C105';
+
+const card = 'rounded-2xl border-2 border-[#111111] bg-white shadow-[4px_4px_0_0_#111111]';
+
+const SectionTitle = ({ icon: Icon, children, aside }) => (
+  <div className="mb-4 flex items-center justify-between gap-3">
+    <h3 className="nt-display flex items-center gap-2 text-[15px] font-black uppercase tracking-wide text-[#111111]">
+      {Icon && (
+        <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-[#F9C105] text-[#111111]">
+          <Icon size={15} strokeWidth={2.5} />
+        </span>
+      )}
+      {children}
+    </h3>
+    {aside}
+  </div>
+);
+
+const EmptyState = ({ title, hint }) => (
+  <div className="flex h-[150px] flex-col items-center justify-center rounded-xl border-2 border-dashed border-[#111111]/20 bg-[#FFF8E1] p-4 text-center">
+    <Truck size={22} className="mb-2 text-[#111111]/40" />
+    <p className="text-sm font-bold text-[#111111]">{title}</p>
+    <p className="mt-1 text-[11px] text-slate-500">{hint}</p>
+  </div>
+);
+
+const greeting = () => {
+  const h = new Date().getHours();
+  if (h < 12) return 'Good morning';
+  if (h < 17) return 'Good afternoon';
+  return 'Good evening';
+};
+
+const readAdminName = () => {
+  try {
+    const info = JSON.parse(localStorage.getItem('adminInfo') || '{}');
+    return String(info?.name || '').split(' ')[0] || 'Admin';
+  } catch {
+    return 'Admin';
+  }
+};
 
 const MainDashboard = () => {
   const navigate = useNavigate();
@@ -58,15 +92,11 @@ const MainDashboard = () => {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [dashboardError, setDashboardError] = useState('');
   const [lastUpdatedAt, setLastUpdatedAt] = useState(null);
-
-  // Timeframe filter state
-  const [timeframe, setTimeframe] = useState('Today'); // Today, Week, Month, Year
-
-  // Interactive Chart states
+  const [timeframe, setTimeframe] = useState('Today'); // Today | Overall
   const [hoveredRevenueIndex, setHoveredRevenueIndex] = useState(null);
   const [hoveredDonutSegment, setHoveredDonutSegment] = useState(null);
+  const [adminName] = useState(readAdminName);
 
-  // Google Maps Loader
   const { isLoaded } = useBaseGoogleMapsLoader();
 
   const fetchData = async (silent = false) => {
@@ -76,8 +106,8 @@ const MainDashboard = () => {
       setDashboard(res?.data || res || {});
       setDashboardError('');
       setLastUpdatedAt(new Date());
-    } catch (err) {
-      setDashboardError(`System offline. Connection to ${BACKEND_LABEL} failed.`);
+    } catch {
+      setDashboardError(`Could not reach ${BACKEND_LABEL}. Showing the last numbers we had.`);
     } finally {
       setIsLoading(false);
       setIsRefreshing(false);
@@ -90,276 +120,317 @@ const MainDashboard = () => {
     return () => clearInterval(interval);
   }, []);
 
-  // Backend Mapped Variables
   const totalUsers = dashboard?.totalUsers || 0;
   const totalDrivers = dashboard?.totalDrivers?.total || 0;
   const approvedDrivers = dashboard?.totalDrivers?.approved || 0;
   const totalOwners = dashboard?.totalOwners || 0;
 
-  // Counts for right now, sent uncached by the backend. Older builds of the
-  // API do not send them, hence the empty object rather than a guess.
+  // Counts for right now, sent uncached by the backend.
   const live = dashboard?.live || {};
-
   const todayEarnings = dashboard?.todayEarnings || {};
   const overallEarnings = dashboard?.overallEarnings || {};
   const notifiedSos = dashboard?.notifiedSos || {};
   const todayTrips = dashboard?.todayTrips || {};
   const overallTrips = dashboard?.overallTrips || {};
 
-  // How much of the fleet that is actually working is carrying someone. The
-  // old version divided approved drivers by all drivers, which is an approval
-  // rate: it read 50% at 4am with nobody online.
+  // Share of the online fleet that is carrying a load right now.
   const fleetUtilization = useMemo(() => {
     const online = Number(live.onlineDrivers || 0);
     if (online === 0) return 0;
     return Math.round((Number(live.driversOnTrip || 0) / online) * 100);
   }, [live.onlineDrivers, live.driversOnTrip]);
 
-  // Each dependency as the backend just found it. The API itself is listed as
-  // answering because this data arrived from it.
   const systemChecks = useMemo(() => {
     const health = live.systemHealth || {};
     const label = (value, fallback) => (value ? String(value) : fallback);
     const ok = (value) => ['operational', 'connected', 'healthy', 'active'].includes(String(value || '').toLowerCase());
-
     return [
       { name: 'Application API', icon: Server, status: 'Answering', healthy: true },
       { name: 'Database', icon: Database, status: label(health.database, 'unknown'), healthy: ok(health.database) },
       { name: 'Socket Server', icon: Activity, status: label(health.socket, 'unknown'), healthy: ok(health.socket) },
       { name: 'Redis Cache', icon: Cpu, status: label(health.redis, 'unknown'), healthy: ok(health.redis) },
       { name: 'Google Maps Key', icon: Map, status: label(health.maps, 'unknown'), healthy: ok(health.maps) },
-    ].map((check) => ({ ...check, color: check.healthy ? 'text-emerald-500' : 'text-rose-500' }));
+    ];
   }, [live.systemHealth]);
 
   const topDrivers = dashboard?.topDrivers || [];
   const driverPositions = live.driverPositions || [];
   const sos = live.sos || {};
 
-  // SVG Area Chart Points mapping for Revenue Trajectory
+  // Revenue area chart
   const chartWidth = 500;
-  const chartHeight = 150;
-  const revenueChartData = useMemo(() => {
-    const rawChart = overallEarnings?.chart || [];
-    if (rawChart.length > 0) {
-      return rawChart.map(item => ({ label: item.label, value: item.amount }));
-    }
-    return [];
-  }, [overallEarnings]);
+  const chartHeight = 160;
+  const revenueChartData = useMemo(
+    () => (overallEarnings?.chart || []).map((item) => ({ label: item.label, value: item.amount })),
+    [overallEarnings],
+  );
 
   const revenuePoints = useMemo(() => {
     if (revenueChartData.length === 0) return [];
-    const maxVal = Math.max(...revenueChartData.map(d => d.value), 1000);
-    return revenueChartData.map((d, i) => {
-      const x = (i / (revenueChartData.length - 1)) * chartWidth;
-      const y = chartHeight - (d.value / maxVal) * (chartHeight - 30) - 15;
-      return { x, y, label: d.label, value: d.value };
-    });
+    const maxVal = Math.max(...revenueChartData.map((d) => d.value), 1000);
+    const step = revenueChartData.length > 1 ? chartWidth / (revenueChartData.length - 1) : 0;
+    return revenueChartData.map((d, i) => ({
+      x: revenueChartData.length > 1 ? i * step : chartWidth / 2,
+      y: chartHeight - (d.value / maxVal) * (chartHeight - 30) - 15,
+      label: d.label,
+      value: d.value,
+    }));
   }, [revenueChartData]);
 
-  const linePath = useMemo(() => {
-    if (revenuePoints.length === 0) return '';
-    return 'M ' + revenuePoints.map(p => `${p.x} ${p.y}`).join(' L ');
-  }, [revenuePoints]);
+  const linePath = useMemo(
+    () => (revenuePoints.length ? 'M ' + revenuePoints.map((p) => `${p.x} ${p.y}`).join(' L ') : ''),
+    [revenuePoints],
+  );
+  const areaPath = useMemo(
+    () => (revenuePoints.length ? `${linePath} L ${chartWidth} ${chartHeight} L 0 ${chartHeight} Z` : ''),
+    [revenuePoints, linePath],
+  );
 
-  const areaPath = useMemo(() => {
-    if (revenuePoints.length === 0) return '';
-    return `${linePath} L ${chartWidth} ${chartHeight} L 0 ${chartHeight} Z`;
-  }, [revenuePoints, linePath]);
-
-  // Donut chart segments for Booking Distribution
+  // Booking donut
   const bookingDonutData = useMemo(() => {
     const completed = todayTrips.completed || 0;
     const cancelled = todayTrips.cancelled || 0;
     const pending = todayTrips.scheduled || 0;
     const total = completed + cancelled + pending;
-    
     if (total === 0) return [];
-    
     return [
-      { label: 'Completed', value: completed, color: '#22C55E', percent: Math.round((completed / total) * 100) },
-      { label: 'Cancelled', value: cancelled, color: '#EF4444', percent: Math.round((cancelled / total) * 100) },
-      { label: 'Pending', value: pending, color: '#FFC400', percent: Math.round((pending / total) * 100) }
+      { label: 'Completed', value: completed, color: '#16A34A', percent: Math.round((completed / total) * 100) },
+      { label: 'Cancelled', value: cancelled, color: '#DC2626', percent: Math.round((cancelled / total) * 100) },
+      { label: 'Scheduled', value: pending, color: YELLOW, percent: Math.round((pending / total) * 100) },
     ];
   }, [todayTrips]);
 
-  const donutRadius = 30;
+  const donutRadius = 32;
   const donutCircumference = 2 * Math.PI * donutRadius;
   const donutSegments = useMemo(() => {
-    let accumulatedAngle = 0;
+    let accumulated = 0;
     return bookingDonutData.map((seg) => {
-      const strokeDasharray = `${(seg.percent / 100) * donutCircumference} ${donutCircumference}`;
-      const strokeDashoffset = -accumulatedAngle;
-      accumulatedAngle += (seg.percent / 100) * donutCircumference;
-      return {
+      const out = {
         ...seg,
-        strokeDasharray,
-        strokeDashoffset
+        strokeDasharray: `${(seg.percent / 100) * donutCircumference} ${donutCircumference}`,
+        strokeDashoffset: -accumulated,
       };
+      accumulated += (seg.percent / 100) * donutCircumference;
+      return out;
     });
   }, [bookingDonutData, donutCircumference]);
 
+  const show = (value) => (isLoading ? '…' : value);
+  const pendingApprovals = Number(live.pendingApprovals || 0);
+  const activeSos = Number(sos.active || 0);
+  const allHealthy = systemChecks.every((check) => check.healthy);
+
+  const quickActions = [
+    { label: 'Approve Drivers', to: '/admin/drivers/pending', icon: UserCheck, badge: pendingApprovals },
+    { label: 'All Bookings', to: '/admin/trips', icon: Route },
+    { label: 'Pricing & Zones', to: '/admin/pricing', icon: Tags },
+    { label: 'Website Content', to: '/admin/settings/cms/landing', icon: FileText },
+  ];
+
+  const networkKpis = [
+    { label: 'Customers', value: totalUsers, icon: Users },
+    { label: 'Drivers', value: totalDrivers, icon: Truck },
+    { label: 'Approved Drivers', value: approvedDrivers, icon: UserCheck },
+    { label: 'Fleet Owners', value: totalOwners, icon: Building2 },
+  ];
+
+  const liveKpis = [
+    { label: 'Drivers Online', value: live.onlineDrivers ?? 0, icon: Wifi },
+    { label: 'Loads In Transit', value: live.ongoingTrips ?? 0, icon: Truck },
+    { label: 'Fleet Utilisation', value: `${fleetUtilization}%`, icon: TrendingUp },
+    { label: 'Pending Approvals', value: pendingApprovals, icon: Clock, alert: pendingApprovals > 0 },
+  ];
+
+  const summary =
+    timeframe === 'Today'
+      ? { revenue: todayEarnings.total, commission: todayEarnings.admin_commission, trips: todayTrips.total }
+      : { revenue: overallEarnings.total, commission: overallEarnings.admin_commission, trips: overallTrips.total };
+
   return (
-    <div className="min-h-screen bg-[#F6F8FC] p-6 lg:p-8 font-sans redigo-admin-root animate-in fade-in duration-300">
-      
-
-
-      <div className="max-w-7xl mx-auto space-y-6">
-        
-        {/* EXECUTIVE HEADER */}
-        <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-          <div>
-            <div className="flex items-center gap-2.5 mb-1.5">
-              <div className="h-2.5 w-2.5 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(34,197,94,0.6)] animate-pulse" />
-              <span className="text-[10px] font-bold uppercase tracking-[0.22em] text-[#64748B]">Terminal Operations Hub</span>
-            </div>
-            <h1>Executive Control Center</h1>
+    <div className="redigo-admin-root nt-dash min-h-screen bg-[#FFF8E1] p-4 sm:p-6 lg:p-8">
+      <div className="mx-auto max-w-7xl space-y-6">
+        {/* HERO */}
+        <section className="relative overflow-hidden rounded-3xl border-2 border-[#111111] bg-[#111111] p-6 text-white shadow-[6px_6px_0_0_#F9C105] sm:p-8">
+          <div aria-hidden="true" className="pointer-events-none absolute -right-16 -top-16 h-64 w-64 rounded-full bg-[#F9C105]/15 blur-3xl" />
+          <div aria-hidden="true" className="pointer-events-none absolute bottom-3 right-6 hidden gap-6 opacity-40 md:flex">
+            {Array.from({ length: 6 }).map((_, i) => (
+              <span key={i} className="h-1.5 w-10 bg-[#F9C105]" />
+            ))}
           </div>
-          <div className="flex items-center gap-3 text-xs">
-            <div className="flex items-center gap-2 px-4 py-2 bg-white rounded-lg border border-[#E5E7EB] shadow-sm">
-              <Clock size={14} className="text-[#64748B]" />
-              <span className="font-semibold text-slate-700">
-                Sync: {lastUpdatedAt?.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
-              </span>
+
+          <div className="relative flex flex-col gap-6 xl:flex-row xl:items-end xl:justify-between">
+            <div>
+              <div className="mb-3 flex items-center gap-2">
+                <span className={`h-2.5 w-2.5 rounded-full ${dashboardError ? 'bg-rose-500' : 'bg-emerald-400 animate-pulse'}`} />
+                <span className="text-[11px] font-bold uppercase tracking-[0.2em] text-[#F9C105]">
+                  {dashboardError ? 'Connection problem' : 'Live operations'}
+                </span>
+              </div>
+              <h1 className="nt-display !text-white text-3xl font-black uppercase leading-none tracking-tight sm:text-4xl">
+                {greeting()}, {adminName}.
+              </h1>
+              <p className="mt-3 max-w-xl text-sm font-medium text-white/60">
+                {new Date().toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}
+                {' · '}
+                {isLoading
+                  ? 'Loading today’s numbers…'
+                  : `${live.ongoingTrips ?? 0} load${(live.ongoingTrips ?? 0) === 1 ? '' : 's'} in transit, ${live.onlineDrivers ?? 0} driver${(live.onlineDrivers ?? 0) === 1 ? '' : 's'} online.`}
+              </p>
             </div>
-            <button
-              onClick={() => fetchData(true)}
-              className="flex items-center justify-center bg-white border border-slate-200 hover:bg-slate-50 transition-colors h-9 w-9 rounded-lg"
-              title="Sync Cloud Data"
-            >
-              <RefreshCw size={15} className={isRefreshing ? 'animate-spin text-slate-900' : 'text-slate-600'} />
-            </button>
+
+            <div className="flex items-stretch gap-3">
+              <div className="rounded-2xl border border-white/15 bg-white/5 px-5 py-3">
+                <p className="text-[10px] font-bold uppercase tracking-widest text-white/50">Today’s revenue</p>
+                <p className="nt-display mt-1 text-3xl font-black text-[#F9C105]">₹{show(currency(todayEarnings.total))}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => fetchData(true)}
+                className="flex flex-col items-center justify-center gap-1 rounded-2xl bg-[#F9C105] px-4 text-[#111111] transition hover:-translate-y-0.5"
+                title={lastUpdatedAt ? `Last synced ${lastUpdatedAt.toLocaleTimeString()}` : 'Refresh'}
+              >
+                <RefreshCw size={18} strokeWidth={2.5} className={isRefreshing ? 'animate-spin' : ''} />
+                <span className="text-[10px] font-black uppercase tracking-wider">
+                  {lastUpdatedAt ? lastUpdatedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Sync'}
+                </span>
+              </button>
+            </div>
           </div>
-        </div>
+
+          <div className="relative mt-6 grid grid-cols-2 gap-2 sm:flex sm:flex-wrap">
+            {quickActions.map(({ label, to, icon, badge }) => { const Icon = icon; return (
+              <button
+                key={to}
+                type="button"
+                onClick={() => navigate(to)}
+                className="group flex items-center gap-2 rounded-xl border border-white/15 bg-white/5 px-3.5 py-2.5 text-left text-[12px] font-bold uppercase tracking-wide text-white transition hover:border-[#F9C105] hover:bg-[#F9C105] hover:text-[#111111]"
+              >
+                <Icon size={15} />
+                <span className="truncate">{label}</span>
+                {badge > 0 && (
+                  <span className="ml-auto rounded-full bg-[#F9C105] px-2 py-0.5 text-[10px] font-black text-[#111111] group-hover:bg-[#111111] group-hover:text-[#F9C105] sm:ml-1">
+                    {badge}
+                  </span>
+                )}
+                <ArrowRight size={13} className="ml-auto hidden opacity-0 transition group-hover:opacity-100 sm:block" />
+              </button>
+            ); })}
+          </div>
+        </section>
 
         {dashboardError && (
-          <div className="rounded-xl bg-rose-50 border border-rose-100 p-4 flex items-center gap-4 animate-shake">
-            <div className="h-10 w-10 bg-white rounded-lg flex items-center justify-center text-rose-500 shadow-sm shrink-0">
-              <CircleAlert size={20} />
-            </div>
-            <div>
-              <p className="text-xs font-bold text-rose-900">Communication Gateway Offline</p>
-              <p className="text-[10px] text-rose-600 mt-0.5 uppercase tracking-wider">{dashboardError}</p>
-            </div>
+          <div className="flex items-center gap-3 rounded-2xl border-2 border-rose-600 bg-rose-50 p-4" role="alert">
+            <CircleAlert size={20} className="shrink-0 text-rose-600" />
+            <p className="text-sm font-bold text-rose-800">{dashboardError}</p>
           </div>
         )}
 
-        {/* 1. LIVE PLATFORM OVERVIEW (10 KPI Cards) */}
-        <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
+        {/* KPIs */}
+        <section className="grid grid-cols-1 gap-4 xl:grid-cols-2">
           {[
-            { label: "Total Customers", value: totalUsers, icon: Users, cardBg: "!bg-violet-500" },
-            { label: "Total Drivers", value: totalDrivers, icon: Car, cardBg: "!bg-sky-500" },
-            { label: "Approved Drivers", value: approvedDrivers, icon: UserCheck, cardBg: "!bg-emerald-500" },
-            { label: "Vendors", value: totalOwners, icon: Building2, cardBg: "!bg-rose-500" },
-            { label: "Online Customers", value: live.onlineCustomers ?? 0, icon: Sparkles, cardBg: "!bg-orange-500" },
-            { label: "Ongoing Trips", value: live.ongoingTrips ?? 0, icon: Activity, cardBg: "!bg-blue-500" },
-            { label: "Today's Revenue", value: `₹${currency(todayEarnings.total)}`, icon: IndianRupee, cardBg: "!bg-emerald-500" },
-            { label: "Online Drivers", value: live.onlineDrivers ?? 0, icon: Server, cardBg: "!bg-violet-500" },
-            { label: "Fleet Utilization", value: `${fleetUtilization}%`, icon: TrendingUp, cardBg: "!bg-teal-500" },
-            { label: "Pending Approvals", value: live.pendingApprovals ?? 0, icon: Clock, cardBg: "!bg-red-500" }
-          ].map((kpi, idx) => (
-            <div key={idx} className={`admin-card !p-4 border-none !text-white hover:scale-[1.02] transition-transform shadow-lg ${kpi.cardBg}`}>
-              <div className="flex items-center justify-between mb-2">
-                <span className="card-label text-[10px] font-bold opacity-80 uppercase tracking-wider">{kpi.label}</span>
-                <div className="p-2 rounded-full bg-white/20 backdrop-blur-sm">
-                  <kpi.icon size={16} strokeWidth={2.5} />
-                </div>
+            { title: 'Network', items: networkKpis },
+            { title: 'Right now', items: liveKpis },
+          ].map((group) => (
+            <div key={group.title} className={`${card} p-5`}>
+              <p className="mb-4 text-[11px] font-black uppercase tracking-[0.2em] text-slate-500">{group.title}</p>
+              <div className="grid grid-cols-2 gap-3 2xl:grid-cols-4">
+                {group.items.map(({ label, value, icon, alert }) => { const Icon = icon; return (
+                  <div
+                    key={label}
+                    className={`rounded-xl p-3 ${alert ? 'bg-[#F9C105]' : 'bg-[#FFF8E1]'}`}
+                  >
+                    <Icon size={16} strokeWidth={2.5} className="text-[#111111]" />
+                    <p className="nt-display mt-2 text-2xl font-black leading-none text-[#111111]">{show(value)}</p>
+                    <p className="mt-1.5 text-[11px] font-bold uppercase tracking-wide text-slate-600">{label}</p>
+                  </div>
+                ); })}
               </div>
-              <h4 className="text-xl font-black tracking-tight mt-1">{isLoading ? '...' : kpi.value}</h4>
             </div>
           ))}
-        </div>
+        </section>
 
-        {/* REVENUE & BOOKING ANALYTICS ROW */}
-        <div className="grid grid-cols-1 gap-6 lg:grid-cols-4">
-          
-          {/* 2. Interactive Revenue Analytics */}
-          <div className="admin-card lg:col-span-2 flex flex-col justify-between hover:shadow-md transition-shadow">
-            <div>
-              <div className="flex items-center justify-between mb-2">
-                <div className="flex items-center gap-2">
-                  <h3 className="text-xs text-[#0B1220] uppercase tracking-wider font-bold">Revenue Analytics</h3>
-                  <div className="h-1.5 w-1.5 rounded-full bg-[#FFC400]" />
-                </div>
-                <div className="flex gap-1">
-                  {['Today', 'Week', 'Month', 'Year'].map((tab) => (
+        {/* REVENUE / BOOKINGS / HEALTH */}
+        <section className="grid grid-cols-1 gap-6 md:grid-cols-2 xl:grid-cols-4">
+          <div className={`${card} p-5 md:col-span-2`}>
+            <SectionTitle
+              icon={IndianRupee}
+              aside={
+                <div className="flex rounded-lg border-2 border-[#111111] p-0.5">
+                  {['Today', 'Overall'].map((tab) => (
                     <button
                       key={tab}
+                      type="button"
                       onClick={() => setTimeframe(tab)}
-                      className={`text-[9px] font-bold px-2 py-0.5 rounded border transition-all ${timeframe === tab ? 'bg-[#FFC400] text-[#0B1220] border-[#FFC400]' : 'bg-transparent text-[#64748B] border-[#E5E7EB]'}`}
+                      className={`rounded-md px-3 py-1 text-[11px] font-black uppercase tracking-wide transition ${
+                        timeframe === tab ? 'bg-[#111111] text-[#F9C105]' : 'text-[#111111] hover:bg-[#FFF8E1]'
+                      }`}
                     >
                       {tab}
                     </button>
                   ))}
                 </div>
-              </div>
-              <p className="text-[11px] text-[#64748B]">Platform commission vs overall driver disbursements.</p>
+              }
+            >
+              Revenue
+            </SectionTitle>
+
+            <div className="mb-4 grid grid-cols-3 gap-2">
+              {[
+                { label: 'Revenue', value: `₹${currency(summary.revenue)}` },
+                { label: 'Commission', value: `₹${currency(summary.commission)}`, accent: true },
+                { label: 'Bookings', value: summary.trips || 0 },
+              ].map((s) => (
+                <div key={s.label} className={`rounded-xl p-3 ${s.accent ? 'bg-[#F9C105]' : 'bg-[#FFF8E1]'}`}>
+                  <p className="text-[10px] font-black uppercase tracking-wider text-[#111111]/60">{s.label}</p>
+                  <p className="nt-display mt-1 text-lg font-black text-[#111111]">{show(s.value)}</p>
+                </div>
+              ))}
             </div>
 
-            <div className="grid grid-cols-3 gap-2 my-3">
-              <div className="bg-slate-50 border border-slate-100 rounded-lg p-2 text-center">
-                <span className="text-[8px] text-[#64748B] block uppercase">Revenue</span>
-                <span className="text-xs font-bold text-[#0B1220] block mt-0.5">
-                  ₹{currency(timeframe === 'Today' ? todayEarnings.total : overallEarnings.total)}
-                </span>
-              </div>
-              <div className="bg-slate-50 border border-slate-100 rounded-lg p-2 text-center">
-                <span className="text-[8px] text-[#64748B] block uppercase font-bold text-[#FFC400]">Commission</span>
-                <span className="text-xs font-bold text-[#0B1220] block mt-0.5">
-                  ₹{currency(timeframe === 'Today' ? todayEarnings.admin_commission : overallEarnings.admin_commission)}
-                </span>
-              </div>
-              <div className="bg-slate-50 border border-slate-100 rounded-lg p-2 text-center">
-                <span className="text-[8px] text-[#64748B] block uppercase">Trips</span>
-                <span className="text-xs font-bold text-[#0B1220] block mt-0.5">
-                  {timeframe === 'Today' ? todayTrips.total : overallTrips.total}
-                </span>
-              </div>
-            </div>
-
-            {/* Interactive SVG Area Chart */}
             {revenueChartData.length === 0 ? (
-              <div className="h-[150px] flex flex-col items-center justify-center border border-dashed border-[#E5E7EB] rounded-2xl bg-slate-50/50 p-4 my-2 text-center">
-                <p className="text-sm font-semibold text-[#0B1220] whitespace-normal">No historical data available</p>
-                <p className="text-[10px] text-[#64748B] mt-1 whitespace-normal">Transaction growth telemetry will automatically sync here.</p>
-              </div>
+              <EmptyState title="No revenue history yet" hint="The trend appears here once bookings are completed." />
             ) : (
               <>
-                <div className="relative pt-2">
+                <div className="relative">
                   <svg viewBox={`0 0 ${chartWidth} ${chartHeight}`} className="w-full overflow-visible">
-                    <path d={areaPath} fill="rgba(255, 196, 0, 0.05)" />
-                    <path d={linePath} fill="none" stroke="#FFC400" strokeWidth="2.5" />
+                    <defs>
+                      <linearGradient id="ntRevenueFill" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0" stopColor={YELLOW} stopOpacity="0.55" />
+                        <stop offset="1" stopColor={YELLOW} stopOpacity="0.05" />
+                      </linearGradient>
+                    </defs>
+                    <path d={areaPath} fill="url(#ntRevenueFill)" />
+                    <path d={linePath} fill="none" stroke={INK} strokeWidth="3" strokeLinejoin="round" />
                     {revenuePoints.map((pt, idx) => (
                       <circle
                         key={idx}
                         cx={pt.x}
                         cy={pt.y}
-                        r={hoveredRevenueIndex === idx ? 6 : 4}
-                        fill={hoveredRevenueIndex === idx ? '#FFC400' : '#FFFFFF'}
-                        stroke="#FFC400"
-                        strokeWidth="2"
+                        r={hoveredRevenueIndex === idx ? 7 : 4.5}
+                        fill={hoveredRevenueIndex === idx ? YELLOW : '#FFFFFF'}
+                        stroke={INK}
+                        strokeWidth="2.5"
                         className="cursor-pointer"
                         onMouseEnter={() => setHoveredRevenueIndex(idx)}
                         onMouseLeave={() => setHoveredRevenueIndex(null)}
                       />
                     ))}
                   </svg>
-
                   {hoveredRevenueIndex !== null && revenuePoints[hoveredRevenueIndex] && (
                     <div
-                      className="absolute bg-slate-900 !text-white rounded p-2 text-[10px] pointer-events-none shadow-xl border border-slate-800"
+                      className="pointer-events-none absolute rounded-lg bg-[#111111] px-2.5 py-1.5 text-[11px] font-bold !text-white shadow-xl"
                       style={{
                         left: `${(revenuePoints[hoveredRevenueIndex].x / chartWidth) * 100}%`,
-                        top: `${(revenuePoints[hoveredRevenueIndex].y / chartHeight) * 100 - 35}%`,
+                        top: `${(revenuePoints[hoveredRevenueIndex].y / chartHeight) * 100 - 30}%`,
                         transform: 'translateX(-50%)',
                       }}
                     >
-                      <span className="font-semibold block">{revenuePoints[hoveredRevenueIndex].label}</span>
-                      <span className="block mt-0.5">Revenue: ₹{currency(revenuePoints[hoveredRevenueIndex].value)}</span>
+                      <span className="block text-[#F9C105]">{revenuePoints[hoveredRevenueIndex].label}</span>₹
+                      {currency(revenuePoints[hoveredRevenueIndex].value)}
                     </div>
                   )}
                 </div>
-
-                <div className="flex justify-between text-[9px] text-[#64748B] pt-2 border-t border-[#E5E7EB] mt-2">
+                <div className="mt-2 flex justify-between border-t-2 border-[#111111]/10 pt-2 text-[10px] font-bold uppercase text-slate-500">
                   {revenueChartData.map((d, i) => (
                     <span key={i}>{d.label}</span>
                   ))}
@@ -368,22 +439,15 @@ const MainDashboard = () => {
             )}
           </div>
 
-          {/* 3. Booking Analytics & Distribution */}
-          <div className="admin-card flex flex-col justify-between hover:shadow-md transition-shadow">
-            <div>
-              <h3 className="text-xs text-[#0B1220] uppercase tracking-wider mb-1 font-bold">Booking Analytics</h3>
-              <p className="text-[11px] text-[#64748B] mb-3">Trips distribution today.</p>
-            </div>
-
+          <div className={`${card} p-5`}>
+            <SectionTitle icon={Route}>Bookings Today</SectionTitle>
             {bookingDonutData.length === 0 ? (
-              <div className="h-[150px] flex flex-col items-center justify-center border border-dashed border-[#E5E7EB] rounded-2xl bg-slate-50/50 p-4 my-2 text-center">
-                <p className="text-sm font-semibold text-[#0B1220] whitespace-normal">No historical data available</p>
-                <p className="text-[10px] text-[#64748B] mt-1 whitespace-normal">Daily booking records and trip statistics will populate here.</p>
-              </div>
+              <EmptyState title="No bookings today" hint="Completed, cancelled and scheduled loads show here." />
             ) : (
               <>
-                <div className="flex items-center justify-center relative py-1">
-                  <svg width="100" height="100" viewBox="0 0 100 100" className="transform -rotate-90">
+                <div className="relative flex items-center justify-center py-1">
+                  <svg width="120" height="120" viewBox="0 0 100 100" className="-rotate-90">
+                    <circle cx="50" cy="50" r={donutRadius} fill="transparent" stroke="#FFF8E1" strokeWidth="12" />
                     {donutSegments.map((seg, i) => (
                       <circle
                         key={i}
@@ -392,34 +456,34 @@ const MainDashboard = () => {
                         r={donutRadius}
                         fill="transparent"
                         stroke={seg.color}
-                        strokeWidth="8"
+                        strokeWidth="12"
                         strokeDasharray={seg.strokeDasharray}
                         strokeDashoffset={seg.strokeDashoffset}
-                        className="cursor-pointer transition-all hover:stroke-[10px]"
+                        className="cursor-pointer"
                         onMouseEnter={() => setHoveredDonutSegment(seg)}
                         onMouseLeave={() => setHoveredDonutSegment(null)}
                       />
                     ))}
                   </svg>
-
                   <div className="absolute text-center">
-                    <span className="text-[8px] text-[#64748B] uppercase block">
-                      {hoveredDonutSegment ? hoveredDonutSegment.label : 'Trips'}
-                    </span>
-                    <span className="text-sm font-bold text-[#0B1220] block mt-0.5">
+                    <span className="nt-display block text-2xl font-black text-[#111111]">
                       {hoveredDonutSegment ? `${hoveredDonutSegment.percent}%` : todayTrips.total || 0}
+                    </span>
+                    <span className="block text-[10px] font-bold uppercase text-slate-500">
+                      {hoveredDonutSegment ? hoveredDonutSegment.label : 'Bookings'}
                     </span>
                   </div>
                 </div>
-
-                <div className="space-y-1.5 pt-2.5 border-t border-[#E5E7EB] mt-2">
-                  {bookingDonutData.map((seg, i) => (
-                    <div key={i} className="flex items-center justify-between text-[10px] text-slate-600">
-                      <div className="flex items-center gap-1.5">
-                        <div className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: seg.color }} />
-                        <span>{seg.label}</span>
-                      </div>
-                      <span className="font-semibold text-[#0B1220]">{seg.value} ({seg.percent}%)</span>
+                <div className="mt-3 space-y-2 border-t-2 border-[#111111]/10 pt-3">
+                  {bookingDonutData.map((seg) => (
+                    <div key={seg.label} className="flex items-center justify-between text-[12px]">
+                      <span className="flex items-center gap-2 font-semibold text-slate-700">
+                        <span className="h-2.5 w-2.5 rounded-sm" style={{ backgroundColor: seg.color }} />
+                        {seg.label}
+                      </span>
+                      <span className="font-black text-[#111111]">
+                        {seg.value} <span className="font-semibold text-slate-400">({seg.percent}%)</span>
+                      </span>
                     </div>
                   ))}
                 </div>
@@ -427,168 +491,167 @@ const MainDashboard = () => {
             )}
           </div>
 
-          {/* 16. Platform Health Diagnostics */}
-          <div className="admin-card flex flex-col justify-between hover:shadow-md transition-shadow">
-            <div>
-              <h3 className="text-xs text-[#0B1220] uppercase tracking-wider mb-1 font-bold">Platform Diagnostic Health</h3>
-              <p className="text-[11px] text-[#64748B] mb-3">Real-time gateway status checks.</p>
-            </div>
-
-            <div className="space-y-2 text-[10px] text-slate-600">
-              {systemChecks.map((item, idx) => (
-                <div key={idx} className="flex items-center justify-between border-b border-[#F1F5F9] pb-1.5">
-                  <span className="flex items-center gap-1.5">
-                    <item.icon size={11} className="text-[#64748B]" />
-                    <span>{item.name}</span>
+          <div className={`${card} flex flex-col p-5`}>
+            <SectionTitle icon={Server}>System Health</SectionTitle>
+            <div className="flex-1 space-y-2">
+              {systemChecks.map(({ name, icon, status, healthy }) => { const Icon = icon; return (
+                <div key={name} className="flex items-center justify-between gap-2 rounded-lg bg-[#FFF8E1] px-3 py-2 text-[12px]">
+                  <span className="flex items-center gap-2 font-semibold text-slate-700">
+                    <Icon size={13} className="text-[#111111]/60" />
+                    {name}
                   </span>
-                  <span className={`font-bold ${item.color}`}>{item.status}</span>
+                  <span className={`flex shrink-0 items-center gap-1.5 font-black capitalize ${healthy ? 'text-emerald-700' : 'text-rose-600'}`}>
+                    <span className={`h-2 w-2 rounded-full ${healthy ? 'bg-emerald-500' : 'bg-rose-500'}`} />
+                    {status}
+                  </span>
+                </div>
+              ); })}
+            </div>
+            <p
+              className={`mt-3 rounded-lg px-3 py-2 text-center text-[11px] font-bold ${
+                allHealthy ? 'bg-emerald-50 text-emerald-800' : 'bg-rose-50 text-rose-700'
+              }`}
+            >
+              {allHealthy
+                ? 'All systems running normally.'
+                : `Needs attention: ${systemChecks.filter((c) => !c.healthy).map((c) => c.name).join(', ')}`}
+            </p>
+          </div>
+        </section>
+
+        {/* LEADERBOARD / SOS / LIVE */}
+        <section className="grid grid-cols-1 gap-6 md:grid-cols-2 xl:grid-cols-3">
+          <div className={`${card} p-5`}>
+            <SectionTitle icon={Award}>Top Drivers</SectionTitle>
+            {topDrivers.length === 0 && !isLoading ? (
+              <EmptyState title="No completed loads yet" hint="Drivers with the most completed bookings appear here." />
+            ) : (
+              <ol className="space-y-2">
+                {topDrivers.map((lead, i) => (
+                  <li key={i} className="flex items-center justify-between rounded-xl bg-[#FFF8E1] px-3 py-2.5">
+                    <div className="flex items-center gap-3">
+                      <span
+                        className={`nt-display flex h-8 w-8 items-center justify-center rounded-lg text-sm font-black ${
+                          i === 0 ? 'bg-[#F9C105] text-[#111111]' : 'bg-[#111111] text-[#F9C105]'
+                        }`}
+                      >
+                        {i + 1}
+                      </span>
+                      <div>
+                        <p className="text-[13px] font-bold text-[#111111]">{lead.name}</p>
+                        <p className="text-[11px] text-slate-500">
+                          {Number(lead.rating) > 0 ? `★ ${Number(lead.rating).toFixed(2)}` : 'Not rated yet'}
+                          {lead.online ? ' · online' : ''}
+                        </p>
+                      </div>
+                    </div>
+                    <span className="text-[12px] font-black text-[#111111]">{lead.trips} loads</span>
+                  </li>
+                ))}
+              </ol>
+            )}
+          </div>
+
+          <div className={`${card} flex flex-col p-5 ${activeSos > 0 ? '!border-rose-600 !shadow-[4px_4px_0_0_#e11d48]' : ''}`}>
+            <SectionTitle
+              icon={Shield}
+              aside={
+                activeSos > 0 && (
+                  <span className="animate-pulse rounded-md bg-rose-600 px-2 py-0.5 text-[10px] font-black uppercase text-white">
+                    Active SOS
+                  </span>
+                )
+              }
+            >
+              Safety & SOS
+            </SectionTitle>
+            <div className="grid flex-1 grid-cols-2 gap-3">
+              <div className={`rounded-xl p-4 text-center ${activeSos > 0 ? 'bg-rose-600 text-white' : 'bg-[#FFF8E1]'}`}>
+                <p className={`nt-display text-4xl font-black ${activeSos > 0 ? '!text-white' : 'text-[#111111]'}`}>{activeSos}</p>
+                <p className={`mt-1 text-[10px] font-black uppercase tracking-wider ${activeSos > 0 ? '!text-white/80' : 'text-slate-500'}`}>
+                  Open alerts
+                </p>
+              </div>
+              <div className="rounded-xl bg-[#FFF8E1] p-4 text-center">
+                <p className="nt-display text-4xl font-black text-[#111111]">{sos.resolved || 0}</p>
+                <p className="mt-1 text-[10px] font-black uppercase tracking-wider text-slate-500">Resolved</p>
+              </div>
+            </div>
+            <div className="mt-3 space-y-1.5 text-[12px]">
+              <div className="flex justify-between text-slate-600">
+                <span>Support tickets open</span>
+                <span className="font-black text-[#111111]">{notifiedSos.total || 0}</span>
+              </div>
+              <div className="flex justify-between text-slate-600">
+                <span>Of those, assigned</span>
+                <span className="font-black text-[#111111]">{notifiedSos.assigned || 0}</span>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => navigate('/admin/safety')}
+              className="mt-4 flex items-center justify-center gap-2 rounded-xl bg-rose-600 py-2.5 text-[12px] font-black uppercase tracking-wider !text-white transition hover:bg-rose-700"
+            >
+              <AlertTriangle size={14} />
+              Open Safety Center
+            </button>
+          </div>
+
+          <div className="flex flex-col rounded-2xl border-2 border-[#111111] bg-[#111111] p-5 text-white shadow-[4px_4px_0_0_#F9C105]">
+            <div className="mb-4 flex items-center justify-between">
+              <h3 className="nt-display flex items-center gap-2 text-[15px] font-black uppercase tracking-wide !text-white">
+                <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-[#F9C105] text-[#111111]">
+                  <Activity size={15} strokeWidth={2.5} />
+                </span>
+                Fleet Live
+              </h3>
+              <span className="flex items-center gap-1.5 rounded-md bg-white/10 px-2 py-0.5 text-[10px] font-black uppercase text-[#F9C105]">
+                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[#F9C105]" /> Live
+              </span>
+            </div>
+            <div className="flex-1 space-y-1">
+              {[
+                { label: 'Drivers online', value: live.onlineDrivers ?? 0 },
+                { label: 'Drivers carrying a load', value: live.driversOnTrip ?? 0 },
+                { label: 'Customers connected', value: live.onlineCustomers ?? 0 },
+                { label: 'Loads in transit', value: live.ongoingTrips ?? 0 },
+                { label: 'Drivers awaiting approval', value: pendingApprovals },
+              ].map((row) => (
+                <div key={row.label} className="flex items-center justify-between border-b border-white/10 py-2 text-[13px] last:border-0">
+                  <span className="text-white/70">{row.label}</span>
+                  <span className="nt-display text-lg font-black text-[#F9C105]">{show(row.value)}</span>
                 </div>
               ))}
             </div>
-
-            <div className="bg-[#F8FAFC] border border-[#E5E7EB] rounded-lg p-2 text-center text-[9px] text-[#64748B] mt-2.5">
-              {systemChecks.every((check) => check.healthy)
-                ? 'All checks answering normally.'
-                : `Needs attention: ${systemChecks.filter((check) => !check.healthy).map((check) => check.name).join(', ')}`}
-            </div>
-          </div>
-        </div>
-
-        {/* SECONDARY ROW (Leaderboards, Activity Feed, MAP, SOS) */}
-        <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
-          
-          {/* Driver & Vendor Performance Leaderboard */}
-          <div className="admin-card flex flex-col justify-between hover:shadow-md transition-shadow">
-            <div>
-              <h3 className="text-xs text-[#0B1220] uppercase tracking-wider mb-3 flex items-center gap-1 font-bold">
-                <Award size={14} className="text-[#FFC400]" />
-                <span>Performance Leaderboard</span>
-              </h3>
-              
-              <div className="space-y-3.5">
-                {topDrivers.length === 0 && !isLoading && (
-                  <p className="text-[11px] text-[#64748B] py-4 text-center">No completed trips yet.</p>
-                )}
-                {topDrivers.map((lead, i) => (
-                  <div key={i} className="flex items-center justify-between text-xs pb-2 border-b border-[#F1F5F9] last:border-0 last:pb-0">
-                    <div className="flex items-center gap-2">
-                      <div className="w-6 h-6 rounded-full bg-slate-50 flex items-center justify-center font-bold text-[10px] text-[#0B1220] border">
-                        {i + 1}
-                      </div>
-                      <div>
-                        <span className="font-semibold block text-[#0B1220]">{lead.name}</span>
-                        <span className="text-[9px] text-slate-400 block mt-0.5">
-                          {Number(lead.rating) > 0 ? `Rating: ${Number(lead.rating).toFixed(2)} ⭐` : 'Not rated yet'}
-                          {lead.online ? ' · online' : ''}
-                        </span>
-                      </div>
-                    </div>
-                    <span className="font-bold text-[#0B1220]">{lead.trips} trips</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-
-          {/* SOS Safety Monitoring & Uptime */}
-          <div className="admin-card flex flex-col justify-between hover:shadow-md transition-shadow relative overflow-hidden">
-            <div>
-              <div className="flex items-center justify-between mb-3">
-                <h3 className="text-xs text-[#0B1220] uppercase tracking-wider flex items-center gap-1.5 font-bold">
-                  <Shield size={14} className="text-rose-500" />
-                  <span>SOS Response Center</span>
-                </h3>
-                {Number(sos.active || 0) > 0 && (
-                  <span className="bg-rose-100 text-rose-800 text-[8px] font-bold px-1.5 py-0.5 rounded border border-rose-200 animate-pulse">
-                    ACTIVE DISTRESS
-                  </span>
-                )}
-              </div>
-
-              <div className="flex items-center justify-around py-4">
-                <div className="text-center">
-                  <span className="text-3xl font-bold text-rose-500 block leading-none">{sos.active || 0}</span>
-                  <span className="text-[9px] text-[#64748B] block mt-1.5 uppercase font-medium">Pending SOS</span>
-                </div>
-                <div className="w-[1px] h-10 bg-[#E5E7EB]" />
-                <div className="text-center">
-                  <span className="text-3xl font-bold text-[#0B1220] block leading-none">{sos.resolved || 0}</span>
-                  <span className="text-[9px] text-[#64748B] block mt-1.5 uppercase font-medium">Resolved Signals</span>
-                </div>
-              </div>
-
-              <div className="bg-slate-50 border border-slate-100 rounded-lg p-2.5 space-y-2 text-[10px] text-slate-600 mt-2">
-                <div className="flex justify-between">
-                  <span>Support tickets open:</span>
-                  <span className="font-bold text-[#0B1220]">{notifiedSos.total || 0}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span>Of those, assigned:</span>
-                  <span className="font-bold text-[#0B1220]">{notifiedSos.assigned || 0}</span>
-                </div>
-              </div>
-            </div>
-
             <button
-              onClick={() => navigate('/admin/safety')}
-              className="admin-btn-primary h-9 text-xs justify-center gap-1.5 mt-3 !bg-rose-600 !!text-white hover:bg-rose-700"
+              type="button"
+              onClick={() => navigate('/admin/drivers')}
+              className="mt-4 flex items-center justify-center gap-2 rounded-xl bg-[#F9C105] py-2.5 text-[12px] font-black uppercase tracking-wider text-[#111111] transition hover:-translate-y-0.5"
             >
-              <AlertTriangle size={13} />
-              <span>Enter Emergency Terminal</span>
+              Manage Drivers <ArrowRight size={14} />
             </button>
           </div>
+        </section>
 
-          {/* Right now, from the live counts */}
-          <div className="admin-card flex flex-col justify-between hover:shadow-md transition-shadow bg-slate-900 !text-white border-0">
-            <div>
-              <div className="flex items-center justify-between mb-3">
-                <h3 className="text-xs !text-white uppercase tracking-wider flex items-center gap-1.5 font-bold">
-                  <Sparkles size={14} className="text-[#FFC400]" />
-                  <span>Right Now</span>
-                </h3>
-                <span className="text-[8px] bg-slate-800 text-slate-300 font-bold px-1.5 py-0.5 rounded border border-slate-700">
-                  Live
-                </span>
+        {/* MAP */}
+        <section className={`${card} p-5`}>
+          <SectionTitle
+            icon={MapPin}
+            aside={
+              <div className="hidden items-center gap-4 text-[11px] font-bold text-slate-600 sm:flex">
+                <span className="flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-full bg-emerald-500" /> Free</span>
+                <span className="flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-full bg-[#F9C105] ring-1 ring-[#111111]" /> On a load</span>
               </div>
-
-              <div className="space-y-2.5 text-xs text-slate-300">
-                {[
-                  { label: 'Drivers online', value: live.onlineDrivers ?? 0 },
-                  { label: 'Drivers on a trip', value: live.driversOnTrip ?? 0 },
-                  { label: 'Customers connected', value: live.onlineCustomers ?? 0 },
-                  { label: 'Trips in progress', value: live.ongoingTrips ?? 0 },
-                  { label: 'Drivers awaiting approval', value: live.pendingApprovals ?? 0 },
-                ].map((row) => (
-                  <div key={row.label} className="flex items-center justify-between border-b border-slate-800 pb-2 last:border-0">
-                    <span>{row.label}</span>
-                    <span className="font-bold !text-white">{isLoading ? '...' : row.value}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <button
-              onClick={() => navigate('/admin/driver-management/drivers')}
-              className="w-full py-2.5 rounded-lg bg-slate-800 hover:bg-slate-750 !text-white text-[10px] font-bold uppercase tracking-wider transition-all mt-4 border border-slate-700"
-            >
-              Open Driver Management
-            </button>
-          </div>
-        </div>
-
-        {/* GOOGLE MAPS DISTRIBUTION & DEMAND */}
-        <div className="admin-card">
-          <h3 className="text-xs text-[#0B1220] uppercase tracking-wider mb-2 flex items-center gap-1.5 font-bold">
-            <MapPin size={14} className="text-[#FFC400]" />
-            <span>Operational Demand Distribution</span>
-          </h3>
-          <p className="text-[11px] text-[#64748B] mb-4">
+            }
+          >
+            Fleet Map
+          </SectionTitle>
+          <p className="-mt-2 mb-4 text-[12px] text-slate-500">
             {driverPositions.length > 0
-              ? `${driverPositions.length} driver${driverPositions.length === 1 ? '' : 's'} online right now. Green is free, amber is on a trip.`
+              ? `${driverPositions.length} driver${driverPositions.length === 1 ? '' : 's'} online right now.`
               : 'No drivers are online right now.'}
           </p>
-
-          <div className="w-full h-80 rounded-xl overflow-hidden border border-[#E5E7EB] bg-slate-50 flex items-center justify-center relative shadow-sm">
+          <div className="relative flex h-80 w-full items-center justify-center overflow-hidden rounded-xl border-2 border-[#111111] bg-[#FFF8E1]">
             {isLoaded ? (
               <GoogleMap
                 mapContainerClassName="w-full h-full"
@@ -597,19 +660,15 @@ const MainDashboard = () => {
                 options={{
                   disableDefaultUI: true,
                   styles: [
-                    { elementType: 'geometry', stylers: [{ color: '#f5f5f5' }] },
-                    { elementType: 'labels.text.fill', stylers: [{ color: '#616161' }] },
-                    { elementType: 'labels.text.stroke', stylers: [{ color: '#f5f5f5' }] },
-                    { featureType: 'administrative.land_parcel', elementType: 'labels.text.fill', stylers: [{ color: '#bdbdbd' }] },
-                    { featureType: 'poi', elementType: 'geometry', stylers: [{ color: '#eeeeee' }] },
-                    { featureType: 'poi', elementType: 'labels.text.fill', stylers: [{ color: '#757575' }] },
+                    { elementType: 'geometry', stylers: [{ color: '#f6f2e6' }] },
+                    { elementType: 'labels.text.fill', stylers: [{ color: '#5f5a4d' }] },
+                    { elementType: 'labels.text.stroke', stylers: [{ color: '#f6f2e6' }] },
+                    { featureType: 'poi', stylers: [{ visibility: 'off' }] },
                     { featureType: 'road', elementType: 'geometry', stylers: [{ color: '#ffffff' }] },
-                    { featureType: 'road.arterial', elementType: 'labels.text.fill', stylers: [{ color: '#757575' }] },
-                    { featureType: 'road.highway', elementType: 'geometry', stylers: [{ color: '#dadada' }] },
-                    { featureType: 'road.highway', elementType: 'labels.text.fill', stylers: [{ color: '#616161' }] },
-                    { featureType: 'water', elementType: 'geometry', stylers: [{ color: '#c9c9c9' }] },
-                    { featureType: 'water', elementType: 'labels.text.fill', stylers: [{ color: '#9e9e9e' }] }
-                  ]
+                    { featureType: 'road.highway', elementType: 'geometry', stylers: [{ color: '#f9d45c' }] },
+                    { featureType: 'road.highway', elementType: 'geometry.stroke', stylers: [{ color: '#e6b204' }] },
+                    { featureType: 'water', elementType: 'geometry', stylers: [{ color: '#cfd6dc' }] },
+                  ],
                 }}
               >
                 {driverPositions
@@ -618,27 +677,26 @@ const MainDashboard = () => {
                     <MarkerF
                       key={driver.id}
                       position={{ lat: driver.lat, lng: driver.lng }}
-                      title={`${driver.name}${driver.onTrip ? ' - on a trip' : ' - free'}`}
+                      title={`${driver.name}${driver.onTrip ? ' - on a load' : ' - free'}`}
                       icon={{
                         path: window.google?.maps?.SymbolPath?.CIRCLE,
-                        scale: 6,
-                        fillColor: driver.onTrip ? '#F59E0B' : '#22C55E',
+                        scale: 7,
+                        fillColor: driver.onTrip ? YELLOW : '#22C55E',
                         fillOpacity: 1,
-                        strokeColor: '#ffffff',
+                        strokeColor: INK,
                         strokeWeight: 2,
                       }}
                     />
                   ))}
               </GoogleMap>
             ) : (
-              <div className="text-center text-xs text-[#64748B] flex flex-col items-center gap-2">
-                <Loader2 size={24} className="animate-spin text-[#0B1220]" />
-                <span>Loading Google Maps Services...</span>
+              <div className="flex flex-col items-center gap-2 text-xs font-semibold text-slate-500">
+                <Loader2 size={24} className="animate-spin text-[#111111]" />
+                Loading map…
               </div>
             )}
           </div>
-        </div>
-
+        </section>
       </div>
     </div>
   );

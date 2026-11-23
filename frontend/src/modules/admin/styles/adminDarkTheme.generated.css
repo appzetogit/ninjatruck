@@ -3094,8 +3094,6 @@ html[data-admin-theme='dark'] .redigo-admin-root .hover\:bg-slate-300\/90:hover 
 
 /* Light arbitrary backgrounds, borders and dark arbitrary text used in the admin code. */
 
-html[data-admin-theme='dark'] .redigo-admin-root .bg-\[\#E5E7EB\],
-html[data-admin-theme='dark'] .redigo-admin-root .hover\:bg-\[\#E5E7EB\]:hover,
 html[data-admin-theme='dark'] .redigo-admin-root .bg-\[\#E9E9E9\],
 html[data-admin-theme='dark'] .redigo-admin-root .hover\:bg-\[\#E9E9E9\]:hover,
 html[data-admin-theme='dark'] .redigo-admin-root .bg-\[\#EEF2FF\],
@@ -3132,6 +3130,8 @@ html[data-admin-theme='dark'] .redigo-admin-root .bg-\[\#FEF2F2\],
 html[data-admin-theme='dark'] .redigo-admin-root .hover\:bg-\[\#FEF2F2\]:hover,
 html[data-admin-theme='dark'] .redigo-admin-root .bg-\[\#FFF7ED\],
 html[data-admin-theme='dark'] .redigo-admin-root .hover\:bg-\[\#FFF7ED\]:hover,
+html[data-admin-theme='dark'] .redigo-admin-root .bg-\[\#FFF8E1\],
+html[data-admin-theme='dark'] .redigo-admin-root .hover\:bg-\[\#FFF8E1\]:hover,
 html[data-admin-theme='dark'] .redigo-admin-root .bg-\[\#FFFDF0\],
 html[data-admin-theme='dark'] .redigo-admin-root .hover\:bg-\[\#FFFDF0\]:hover,
 html[data-admin-theme='dark'] .redigo-admin-root .bg-\[\#FFFDF4\],
@@ -3154,6 +3154,7 @@ html[data-admin-theme='dark'] .redigo-admin-root .border-\[\#F1F5F9\] {
 
 html[data-admin-theme='dark'] .redigo-admin-root .text-\[\#05070D\],
 html[data-admin-theme='dark'] .redigo-admin-root .text-\[\#0B1220\],
+html[data-admin-theme='dark'] .redigo-admin-root .text-\[\#111111\],
 html[data-admin-theme='dark'] .redigo-admin-root .text-\[\#151515\],
 html[data-admin-theme='dark'] .redigo-admin-root .text-\[\#1E293B\],
 html[data-admin-theme='dark'] .redigo-admin-root .text-\[\#2D3A6E\],
