@@ -104,6 +104,15 @@ export const adminService = {
   getOwnerWalletHistory: (id) => api.get(`/admin/wallet/owners/${id}/history`),
 
   getReferralDashboard: () => api.get('/admin/referral/dashboard'),
+  // Vehicle insurance (Price Management > Vehicle Insurance)
+  getInsuranceApplications: (params) => api.get('/insurance/admin', { params }),
+  processInsuranceApplication: (id, data) => api.patch(`/insurance/admin/${id}`, data),
+  getInsurancePlans: () => api.get('/insurance/admin/plans'),
+  updateInsurancePlan: (vehicleType, rates) => api.put(`/insurance/admin/plans/${vehicleType}`, { rates }),
+  getInsuranceSettings: () => api.get('/insurance/admin/settings'),
+  updateInsuranceSettings: (data) => api.patch('/insurance/admin/settings', data),
+  uploadInsuranceImage: (image) => api.post('/insurance/admin/upload-image', { image }),
+
   getRewardSettings: () => api.get('/admin/rewards/settings'),
   updateRewardSettings: (data) => api.patch('/admin/rewards/settings', data),
   getRewardLevels: (params = {}) => api.get('/admin/rewards/levels', { params }),

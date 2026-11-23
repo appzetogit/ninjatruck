@@ -113,6 +113,7 @@ import {
   AdminReferralDashboard,
   AdminReferralTranslation,
   AdminRewardSettings,
+  AdminVehicleInsurance,
   AdminRewardClaims,
   AdminRentalBookingRequests,
   AdminRentalCommissionManager,
@@ -294,6 +295,7 @@ const adminRoutes = (
       <Route path="referrals/driver-settings" element={<AdminDriverReferralSettings />} />
       <Route path="referrals/translation" element={<AdminReferralTranslation />} />
       <Route path="referrals/rewards" element={<AdminRewardSettings />} />
+      <Route path="pricing/insurance" element={<AdminVehicleInsurance />} />
       <Route path="referrals/reward-claims" element={<AdminRewardClaims />} />
       <Route path="promotions/promo-codes" element={<AdminPromoCodes />} />
       <Route path="promotions/promo-codes/create" element={<AdminPromoCodes />} />

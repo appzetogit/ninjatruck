@@ -8,6 +8,7 @@ import { commonRouter } from '../common/routes/commonRoutes.js';
 import { careerRouter } from '../career/routes/careerRoutes.js';
 import { busModuleRouter } from '../bus/routes/index.js';
 import { rewardRouter } from '../rewards/routes/rewardRoutes.js';
+import { insuranceRouter } from '../insurance/routes/insuranceRoutes.js';
 
 export const taxiRouter = Router();
 
@@ -20,3 +21,4 @@ taxiRouter.use(commonRouter);
 taxiRouter.use(careerRouter);
 taxiRouter.use(busModuleRouter);
 taxiRouter.use(rewardRouter);
+taxiRouter.use(insuranceRouter);
