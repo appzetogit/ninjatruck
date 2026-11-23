@@ -2,6 +2,7 @@ import { Route, useOutletContext } from 'react-router-dom';
 import LandingShell from './LandingShell';
 import { LANDING_TABS } from './landingTabs';
 import Home from './pages/Home';
+import NinjaTruckHome from './pages/NinjaTruckHome';
 import AboutUs from './pages/AboutUs';
 import Services from './pages/Services';
 import Corporate from './pages/Corporate';
@@ -37,13 +38,18 @@ const PAGES = {
 
 // Paths come from LANDING_TABS so the nav highlighting and the router can never
 // drift apart.
+// "/" is the Ninja Truck home page. It has its own header and footer, so it sits
+// outside LandingShell. The other marketing pages stay inside the shell.
 const landingRoutes = (
-  <Route element={<LandingShell />}>
-    {LANDING_TABS.map(({ id, path }) => {
-      const Page = PAGES[id];
-      return <Route key={id} path={path} element={<Page />} />;
-    })}
-  </Route>
+  <>
+    <Route path="/" element={<NinjaTruckHome />} />
+    <Route element={<LandingShell />}>
+      {LANDING_TABS.filter(({ id }) => id !== 'home').map(({ id, path }) => {
+        const Page = PAGES[id];
+        return <Route key={id} path={path} element={<Page />} />;
+      })}
+    </Route>
+  </>
 );
 
 export default landingRoutes;

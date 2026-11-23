@@ -14,6 +14,17 @@ Live on `zicab.in`:
 The app itself runs under PM2 as four instances (`zicab-api-5000` … `5003`),
 which nginx load-balances via the upstream block.
 
+Live on `ninjatruck.live` (same server, 145.223.21.188):
+
+| File | Installed at |
+|---|---|
+| `nginx/ninjatruck.live.conf` | `/etc/nginx/sites-available/ninjatruck.live.conf` (symlinked into `sites-enabled`) |
+
+Static build only, served from `/var/www/ninjatruck`; it calls the backend at
+`zicab.in`. To redeploy, build with the server's public `VITE_*` values from
+`/opt/zicab/frontend/.env.production`, then replace `/var/www/ninjatruck` with
+the new `dist/`.
+
 ## Frontend deploys
 
 ```
