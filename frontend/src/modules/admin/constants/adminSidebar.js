@@ -88,6 +88,8 @@ export const ADMIN_SIDEBAR_SECTIONS = [
           { label: 'Hike Slots', path: '/admin/pricing/price-hike', permission: 'set_prices.view' },
         ],
       },
+      /* Hidden for Ninja Truck: Rental and Bus Service are ZI CAB products.
+         The pages and routes still exist; uncomment to bring the menus back.
       {
         icon: Briefcase,
         label: 'Rental',
@@ -118,6 +120,7 @@ export const ADMIN_SIDEBAR_SECTIONS = [
           { label: 'Booking Channels', path: '/admin/bus-service/channels', permission: 'bus_service.view' },
         ],
       },
+      */
       {
         icon: UtensilsCrossed,
         label: 'Dhaba & Food',
