@@ -32,6 +32,10 @@ export const getNotifications = asyncHandler(async (req, res) =>
   ok(res, await promotionsService.listNotifications(req.query)),
 );
 
+export const getNotificationAudience = asyncHandler(async (req, res) =>
+  ok(res, await promotionsService.getNotificationAudience(req.query)),
+);
+
 export const sendNotification = asyncHandler(async (req, res) =>
   ok(res, await promotionsService.createNotification(req.body)),
 );
@@ -40,6 +44,15 @@ export const deleteNotification = asyncHandler(async (req, res) => {
   await promotionsService.deleteNotification(req.params.id);
   ok(res, { deleted: true });
 });
+
+/// Public banner feed for the apps' home carousel.
+///
+/// Separate from the admin list on purpose: this returns only active
+/// banners and takes no paging or filter input, so an unauthenticated
+/// caller cannot page through drafts.
+export const getPublicBanners = asyncHandler(async (_req, res) =>
+  ok(res, await promotionsService.listBanners({ active: true, limit: 50 })),
+);
 
 export const getBanners = asyncHandler(async (req, res) =>
   ok(res, await promotionsService.listBanners(req.query)),

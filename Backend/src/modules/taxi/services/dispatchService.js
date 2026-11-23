@@ -1,3 +1,4 @@
+import { ApiError } from '../../../utils/ApiError.js';
 import crypto from 'node:crypto';
 import mongoose from 'mongoose';
 import { runRedisCommand } from '../../../infrastructure/redis/redisClient.js';
@@ -5,6 +6,7 @@ import { Ride } from '../user/models/Ride.js';
 import { User } from '../user/models/User.js';
 import { UserWallet } from '../user/models/UserWallet.js';
 import { Driver } from '../driver/models/Driver.js';
+import { Vehicle } from '../admin/models/Vehicle.js';
 import { WalletTransaction } from '../driver/models/WalletTransaction.js';
 import { applyDriverWalletAdjustment } from '../driver/services/walletService.js';
 import { matchDrivers } from './matchingService.js';
@@ -13,10 +15,12 @@ import {
   RIDE_STATUS,
 } from '../constants/index.js';
 import { Delivery } from '../user/models/Delivery.js';
-import { getRideRoom, resolveSetPriceForRide } from './rideService.js';
+import { estimateDriverEarning } from './driverEarningEstimate.js';
+import { getRideDetails, getRideRoom, resolveSetPriceForRide, serializeRideRealtime, serializeTollCharges } from './rideService.js';
 import { SOCKET_EVENTS } from '../socket/events.js';
 import { resolveTransportDispatchConfig } from './transportSettingsService.js';
 import { sendPushNotificationToEntities } from './pushNotificationService.js';
+import { releaseDriverCancellation, reserveDriverCancellation } from './driverCancelLimitService.js';
 
 const activeDispatches = new Map();
 let ioInstance = null;
@@ -32,7 +36,56 @@ const DISPATCH_LEASE_REFRESH_MS = 30_000;
 const DISPATCH_RECOVERY_INTERVAL_MS = 30_000;
 const LATE_DRIVER_NOTIFICATION_COOLDOWN_MS = 10_000;
 
+/// How long before a scheduled ride's pickup time the search for a driver
+/// begins. A scheduled trip should already have a captain assigned by the time
+/// the rider is due to leave, so dispatch fires this many minutes early rather
+/// than exactly at pickup. Override with SCHEDULED_DISPATCH_LEAD_MINUTES.
+const SCHEDULED_DISPATCH_LEAD_MINUTES = Math.max(
+  0,
+  Number(process.env.SCHEDULED_DISPATCH_LEAD_MINUTES ?? 15) || 0,
+);
+const SCHEDULED_DISPATCH_LEAD_MS = SCHEDULED_DISPATCH_LEAD_MINUTES * 60 * 1000;
+
 const roundMoney = (value) => Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100;
+
+/// Straight-line metres between two GeoJSON `[lng, lat]` pairs.
+///
+/// Good enough for the "x km away" line on an offer card — the driver is being
+/// told roughly how far the pickup is, not given a route.
+const distanceBetweenCoordsMeters = (from, to) => {
+  if (!Array.isArray(from) || !Array.isArray(to) || from.length < 2 || to.length < 2) {
+    return null;
+  }
+
+  const [fromLng, fromLat] = from.map(Number);
+  const [toLng, toLat] = to.map(Number);
+  if ([fromLng, fromLat, toLng, toLat].some((value) => !Number.isFinite(value))) {
+    return null;
+  }
+
+  const EARTH_RADIUS_M = 6371000;
+  const toRadians = (deg) => (deg * Math.PI) / 180;
+  const dLat = toRadians(toLat - fromLat);
+  const dLng = toRadians(toLng - fromLng);
+  const a = Math.sin(dLat / 2) ** 2
+    + Math.cos(toRadians(fromLat)) * Math.cos(toRadians(toLat)) * Math.sin(dLng / 2) ** 2;
+
+  return EARTH_RADIUS_M * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+};
+
+/// Empty rather than "0.0" when unknown, so the card can hide the line instead
+/// of claiming the pickup is zero kilometres away.
+const formatOfferKm = (meters) => {
+  const value = Number(meters);
+  if (!Number.isFinite(value) || value < 0) return '';
+  return (value / 1000).toFixed(1);
+};
+
+const formatOfferFare = (fare) => {
+  const value = Number(fare);
+  if (!Number.isFinite(value)) return '';
+  return String(Math.round(value));
+};
 const getDispatchLeaseKey = (rideId) => `dispatch:lease:${String(rideId)}`;
 
 const renewDispatchLease = async (rideId) => {
@@ -207,11 +260,13 @@ const matchDispatchDrivers = async ({
   ride,
   radius,
   dispatchVehicleTypeIds,
+  excludeDriverIds = [],
 }) => {
   const sharedOptions = {
     maxDistance: radius,
     vehicleTypeId: ride.vehicleTypeId,
     vehicleTypeIds: dispatchVehicleTypeIds,
+    excludeDriverIds,
   };
 
   let result = await matchDrivers(ride.pickupLocation.coordinates, {
@@ -402,7 +457,8 @@ const settleDriverCancellationFee = async (ride, session) => {
     return { feeAmount: 0, driverDebitStatus: 'none', userCreditStatus: 'none', driverWalletResult: null };
   }
 
-  const feeReferenceBase = `ride-cancel:driver:${String(ride._id)}`;
+  // Per driver: the same ride can now pass through more than one cancelling driver.
+  const feeReferenceBase = `ride-cancel:driver:${String(ride._id)}:${String(ride.driverId)}`;
   const driverDebit = await applyDriverWalletAdjustmentByReference({
     driverId: ride.driverId,
     amount: -feeAmount,
@@ -633,7 +689,7 @@ export const restartRideDispatchWithLatestFare = async (rideId) => {
   stopDispatchFlow(rideId, { releaseLease: false });
   await persistDispatchTrackingProgress({ rideId, reset: true }).catch(() => null);
 
-  const ride = await Ride.findById(rideId).populate('userId', 'name phone countryCode');
+  const ride = await Ride.findById(rideId).populate('userId', 'name phone countryCode profileImage');
   if (!ride || ride.status !== RIDE_STATUS.SEARCHING || ride.liveStatus !== RIDE_LIVE_STATUS.SEARCHING) {
     return;
   }
@@ -682,6 +738,25 @@ const closeDriverRequestWindow = (rideId, driverIds = []) => {
       reason: 'search-window-expired',
     });
   }
+
+  // The socket only reaches a driver whose app is awake; the push is what takes
+  // the native card down on a phone sitting in a pocket.
+  sendRideOfferClosedPush(safeDriverIds, rideId);
+};
+
+/// The real, admin-configured vehicle-type name (e.g. "Zi Mini Truck",
+/// "Zi Scooty Parcel") — shown on the driver's offer so they know which of
+/// their registered vehicle types this particular request is for. Distinct
+/// from `serviceType` ('ride'/'parcel'), which only says whether it's a
+/// passenger trip or a delivery, not which vehicle class within it.
+const resolveVehicleLabel = async (vehicleTypeId) => {
+  if (!vehicleTypeId) return '';
+  try {
+    const vehicle = await Vehicle.findById(vehicleTypeId).select('name').lean();
+    return vehicle?.name || '';
+  } catch {
+    return '';
+  }
 };
 
 const emitRideRequestToDrivers = async ({
@@ -698,6 +773,10 @@ const emitRideRequestToDrivers = async ({
   }
 
   const requestExpiresAt = new Date(Date.now() + dispatchConfig.retryDelayMs).toISOString();
+  // Resolved once per dispatch wave, not per driver — every driver in this
+  // wave is being offered the same ride, so the label is identical for all
+  // of them.
+  const vehicleLabel = await resolveVehicleLabel(ride.vehicleTypeId);
 
   for (const driver of targetDrivers) {
     emitToDriver(driver._id, 'rideRequest', {
@@ -720,10 +799,14 @@ const emitRideRequestToDrivers = async ({
       estimatedDurationMinutes: ride.estimatedDurationMinutes || 0,
       vehicleTypeId: ride.vehicleTypeId ? String(ride.vehicleTypeId) : null,
       vehicleTypeIds: dispatchVehicleTypeIds,
+      vehicleLabel,
       vehicleIconType: ride.vehicleIconType,
       vehicleIconUrl: ride.vehicleIconUrl || '',
       fare: ride.fare,
       baseFare: Number(ride.baseFare || ride.fare || 0),
+      surgeMultiplier: Number(ride.surge?.multiplier || 1),
+      tollCharges: serializeTollCharges(ride.tollCharges),
+      ...estimateDriverEarning(ride),
       bookingMode: ride.bookingMode || 'normal',
       pricingNegotiationMode: ride.pricingNegotiationMode || 'none',
       biddingStatus: ride.biddingStatus || 'none',
@@ -754,20 +837,76 @@ const emitRideRequestToDrivers = async ({
     });
   }
 
+  // Sent per driver, not as one multicast: the card shows how far *this*
+  // driver is from the pickup, which differs for each of them.
+  for (const driver of targetDrivers) {
+    sendPushNotificationToEntities({
+      driverIds: [String(driver._id)],
+      title: ride.serviceType === 'parcel' ? 'New delivery request' : 'New ride request',
+      body: ride.pickupAddress
+        ? `Pickup: ${ride.pickupAddress}`
+        : 'A new booking is waiting for your response.',
+      // Data-only. A `notification` block would be swallowed by the system tray
+      // while the driver's app is backgrounded, and the native full-screen card
+      // would never post — which is the whole point of this push.
+      dataOnly: true,
+      data: {
+        type: 'ride_request',
+        rideId: String(ride._id),
+        serviceType: ride.serviceType || 'ride',
+        userId: String(ride.userId?._id || ride.userId || ''),
+        // Everything below is what the native card renders. It has to be
+        // drawable with the app killed and no network, so anything missing here
+        // simply cannot be shown.
+        fare: formatOfferFare(ride.fare),
+        riderName: ride.userId?.name || 'Customer',
+        riderImage: ride.userId?.profileImage || '',
+        pickupAddress: ride.pickupAddress || '',
+        dropAddress: ride.dropAddress || '',
+        pickupDistanceKm: formatOfferKm(
+          distanceBetweenCoordsMeters(
+            driver?.location?.coordinates,
+            ride.pickupLocation?.coordinates,
+          ),
+        ),
+        tripDistanceKm: formatOfferKm(ride.estimatedDistanceMeters),
+        vehicleIconType: ride.vehicleIconType || '',
+        // The real catalog name ("Zi Mini Truck") when the vehicle resolved;
+        // falls back to the generic type only if it didn't (e.g. a ride with
+        // no vehicleTypeId at all), so the card is never blank.
+        vehicleLabel: vehicleLabel || (ride.serviceType === 'parcel' ? 'Parcel' : 'Ride'),
+        expiresInSeconds: String(dispatchConfig.retryWindowSeconds),
+      },
+    }).catch((error) => {
+      console.error('Failed to send driver ride-request push notification', error);
+    });
+  }
+};
+
+/// Tells a driver's phone to take the offer card down.
+///
+/// Without this the native card outlives the offer: a ride cancelled, taken by
+/// someone else, or simply expired leaves a full-screen card on a parked
+/// driver's phone with a countdown that has already run out. The socket event
+/// only reaches an app that is awake, which is exactly the case the card exists
+/// to cover.
+export const sendRideOfferClosedPush = (driverIds = [], rideId) => {
+  const ids = [...new Set((driverIds || []).map((id) => String(id || '')).filter(Boolean))];
+  if (!ids.length || !rideId) {
+    return;
+  }
+
   sendPushNotificationToEntities({
-    driverIds: targetDrivers.map((driver) => String(driver._id)),
-    title: ride.serviceType === 'parcel' ? 'New delivery request' : 'New ride request',
-    body: ride.pickupAddress
-      ? `Pickup: ${ride.pickupAddress}`
-      : 'A new booking is waiting for your response.',
+    driverIds: ids,
+    title: 'Ride request closed',
+    body: 'This booking is no longer available.',
+    dataOnly: true,
     data: {
-      type: 'ride_request',
-      rideId: String(ride._id),
-      serviceType: ride.serviceType || 'ride',
-      userId: String(ride.userId?._id || ride.userId || ''),
+      type: 'ride_request_closed',
+      rideId: String(rideId),
     },
   }).catch((error) => {
-    console.error('Failed to send driver ride-request push notification', error);
+    console.error('Failed to send ride-request-closed push notification', error);
   });
 };
 
@@ -826,6 +965,8 @@ const closeRideAsUnmatched = async (rideId) => {
       reason: 'unmatched',
     });
   }
+
+  sendRideOfferClosedPush(dispatchState.notifiedDriverIds, ride._id);
 
   emitToRoom(getRideRoom(ride._id), SOCKET_EVENTS.RIDE_STATUS_UPDATED, {
     rideId: String(ride._id),
@@ -896,61 +1037,88 @@ export const cancelRideByAdmin = async (rideId) => {
 export const cancelRideByUser = async ({ rideId, userId }) => {
   const dispatchState = getDispatchState(rideId);
   stopDispatchFlow(rideId, { releaseLease: false });
-  const session = await mongoose.startSession();
-  let ride = null;
+
+  // Written without a transaction on purpose: this deployment runs a standalone
+  // mongod, which rejects them outright ("Transaction numbers are only allowed
+  // on a replica set member or mongos"), so the previous version could not
+  // cancel a ride at all.
+  //
+  // The atomicity that matters is that a ride is cancelled exactly once — a
+  // second cancel must not settle the fee twice. That is a single-document
+  // condition, and a conditional findOneAndUpdate provides it without a
+  // transaction: whichever request flips the ride first wins, and every later
+  // one finds nothing left to flip.
+  const existing = await Ride.findOne({ _id: rideId, userId });
+
+  if (!existing) {
+    stopDispatchFlow(rideId);
+    return null;
+  }
+
+  if (existing.status === RIDE_STATUS.COMPLETED || existing.liveStatus === RIDE_LIVE_STATUS.COMPLETED) {
+    stopDispatchFlow(rideId);
+    throw new Error('Completed rides cannot be cancelled');
+  }
+
+  if (existing.status === RIDE_STATUS.CANCELLED || existing.liveStatus === RIDE_LIVE_STATUS.CANCELLED) {
+    stopDispatchFlow(rideId);
+    return existing;
+  }
+
+  // Once the driver has entered the pickup OTP the parcel is in their hands.
+  if (isParcelPastPickupOtp(existing)) {
+    throw new ApiError(409, 'This parcel has already been picked up and can no longer be cancelled');
+  }
+
+  const cancelUpdate = {
+    status: RIDE_STATUS.CANCELLED,
+    liveStatus: RIDE_LIVE_STATUS.CANCELLED,
+  };
+  if (existing.bookingMode === 'bidding') {
+    cancelUpdate.biddingStatus = 'cancelled';
+  }
+
+  let ride = await Ride.findOneAndUpdate(
+    {
+      _id: rideId,
+      userId,
+      status: { $nin: [RIDE_STATUS.CANCELLED, RIDE_STATUS.COMPLETED] },
+      liveStatus: { $nin: [RIDE_LIVE_STATUS.CANCELLED, RIDE_LIVE_STATUS.COMPLETED] },
+    },
+    { $set: cancelUpdate },
+    { new: true },
+  );
+
+  if (!ride) {
+    // Cancelled or completed between the read above and this write.
+    stopDispatchFlow(rideId);
+    return Ride.findOne({ _id: rideId, userId });
+  }
+
+  // Settled after the flip rather than before it, so the fee can only follow a
+  // cancellation that actually took. The wallet adjustments are keyed by a
+  // per-ride reference, so a retry cannot double-charge either way.
   let cancellationSettlement = null;
-
   try {
-    session.startTransaction();
+    cancellationSettlement = await settleUserCancellationFee(ride);
+  } catch (error) {
+    // A fee that cannot be settled must not leave the rider stuck in a ride
+    // they already cancelled.
+    console.error('Could not settle the rider cancellation fee', error);
+  }
 
-    ride = await Ride.findOne({ _id: rideId, userId }).session(session);
-
-    if (!ride) {
-      await session.abortTransaction();
-      stopDispatchFlow(rideId);
-      return null;
-    }
-
-    if (ride.status === RIDE_STATUS.COMPLETED || ride.liveStatus === RIDE_LIVE_STATUS.COMPLETED) {
-      throw new Error('Completed rides cannot be cancelled');
-    }
-
-    if (ride.status === RIDE_STATUS.CANCELLED || ride.liveStatus === RIDE_LIVE_STATUS.CANCELLED) {
-      await session.commitTransaction();
-      stopDispatchFlow(rideId);
-      return ride;
-    }
-
-    cancellationSettlement = await settleUserCancellationFee(ride, session);
-
-    ride.status = RIDE_STATUS.CANCELLED;
-    ride.liveStatus = RIDE_LIVE_STATUS.CANCELLED;
-    if (ride.bookingMode === 'bidding') {
-      ride.biddingStatus = 'cancelled';
-    }
-    await ride.save({ session });
-
-    if (ride.deliveryId) {
-      await Delivery.findByIdAndUpdate(ride.deliveryId, {
+  await Promise.all([
+    ride.deliveryId
+      ? Delivery.findByIdAndUpdate(ride.deliveryId, {
         driverId: ride.driverId || null,
         status: ride.status,
         liveStatus: ride.liveStatus,
-      }, { session });
-    }
+      })
+      : Promise.resolve(),
+    User.findByIdAndUpdate(ride.userId, { currentRideId: null }),
+    ride.driverId ? Driver.findByIdAndUpdate(ride.driverId, { isOnRide: false }) : Promise.resolve(),
+  ]);
 
-    await Promise.all([
-      User.findByIdAndUpdate(ride.userId, { currentRideId: null }, { session }),
-      ride.driverId ? Driver.findByIdAndUpdate(ride.driverId, { isOnRide: false }, { session }) : Promise.resolve(),
-    ]);
-
-    await session.commitTransaction();
-  } catch (error) {
-    await session.abortTransaction();
-    stopDispatchFlow(rideId);
-    throw error;
-  } finally {
-    session.endSession();
-  }
   await persistDispatchTrackingProgress({ rideId, reset: true }).catch(() => null);
 
   emitToRoom(getUserRoom(ride.userId), 'rideCancelled', {
@@ -960,6 +1128,14 @@ export const cancelRideByUser = async ({ rideId, userId }) => {
   });
 
   if (ride.driverId) {
+    // Also on the driver's own room: the ride-room copy below never reaches a
+    // driver whose socket reconnected without rejoining it, and the app then
+    // kept the trip open and ignored every later offer.
+    emitToRoom(getDriverRoom(ride.driverId), 'rideCancelled', {
+      rideId: String(ride._id),
+      room: getRideRoom(ride._id),
+      reason: 'User cancelled the ride',
+    });
     emitToRoom(getDriverRoom(ride.driverId), 'rideRequestClosed', {
       rideId: String(ride._id),
       reason: 'user-cancelled',
@@ -974,6 +1150,8 @@ export const cancelRideByUser = async ({ rideId, userId }) => {
       message: 'User cancelled the ride.',
     });
   }
+
+  sendRideOfferClosedPush(dispatchState.notifiedDriverIds, ride._id);
 
   emitToRoom(getRideRoom(ride._id), 'rideCancelled', {
     rideId: String(ride._id),
@@ -1010,117 +1188,201 @@ export const cancelRideByUser = async ({ rideId, userId }) => {
   return ride;
 };
 
+/// A parcel stays cancellable (by rider or driver) from acceptance until the
+/// driver enters the pickup OTP, which moves it to 'started'.
+const isParcelPastPickupOtp = (ride) =>
+  String(ride?.serviceType || '') === 'parcel' &&
+  [RIDE_LIVE_STATUS.STARTED, RIDE_LIVE_STATUS.ARRIVED].includes(ride?.liveStatus);
+
+const isCancellableActiveParcel = (ride) =>
+  String(ride?.serviceType || '') === 'parcel' &&
+  Boolean(ride?.driverId) &&
+  [RIDE_LIVE_STATUS.ACCEPTED, RIDE_LIVE_STATUS.ARRIVING].includes(ride?.liveStatus) &&
+  ![RIDE_STATUS.CANCELLED, RIDE_STATUS.COMPLETED].includes(ride?.status);
+
+const isCancellableScheduledRide = (ride) => {
+  const scheduledAt = ride?.scheduledAt ? new Date(ride.scheduledAt) : null;
+  return (
+    Boolean(scheduledAt) &&
+    Number.isFinite(scheduledAt.getTime()) &&
+    scheduledAt.getTime() > Date.now() &&
+    ![RIDE_STATUS.CANCELLED, RIDE_STATUS.COMPLETED].includes(ride.status) &&
+    ![RIDE_LIVE_STATUS.CANCELLED, RIDE_LIVE_STATUS.COMPLETED].includes(ride.liveStatus)
+  );
+};
+
+export const cancelActiveParcelByDriver = async ({ rideId, driverId }) => {
+  const candidate = await Ride.findOne({ _id: rideId, driverId }).select('serviceType status liveStatus driverId').lean();
+  const reservation = isCancellableActiveParcel(candidate)
+    ? await reserveDriverCancellation(driverId)
+    : null;
+
+  const outcome = { cancelled: false };
+  try {
+    return await runScheduledRideCancellation({ rideId, driverId, outcome, kind: 'parcel' });
+  } finally {
+    if (!outcome.cancelled) {
+      await releaseDriverCancellation(reservation);
+    }
+  }
+};
+
 export const cancelScheduledRideByDriver = async ({ rideId, driverId }) => {
+  // Before anything else: a refused cancel must leave the ride exactly as it was,
+  // dispatch included. Only a ride this will really cancel uses up the limit, so
+  // a repeat tap on a cancelled ride costs nothing.
+  const candidate = await Ride.findOne({ _id: rideId, driverId }).select('scheduledAt status liveStatus').lean();
+  const reservation = isCancellableScheduledRide(candidate)
+    ? await reserveDriverCancellation(driverId)
+    : null;
+
+  const outcome = { cancelled: false };
+  try {
+    return await runScheduledRideCancellation({ rideId, driverId, outcome });
+  } finally {
+    if (!outcome.cancelled) {
+      await releaseDriverCancellation(reservation);
+    }
+  }
+};
+
+const runScheduledRideCancellation = async ({ rideId, driverId, outcome, kind = 'scheduled' }) => {
+  const isParcelCancel = kind === 'parcel';
   const dispatchState = getDispatchState(rideId);
   stopDispatchFlow(rideId, { releaseLease: false });
-  const session = await mongoose.startSession();
-  let ride = null;
+
+  // Written without a transaction on purpose: this deployment runs a standalone
+  // mongod, which rejects them outright ("Transaction numbers are only allowed
+  // on a replica set member or mongos"), so the previous version could not
+  // cancel a ride at all.
+  //
+  // The atomicity that matters is that a ride is cancelled exactly once — a
+  // second cancel must not settle the fee twice. That is a single-document
+  // condition, and a conditional findOneAndUpdate provides it without a
+  // transaction: whichever request flips the ride first wins, and every later
+  // one finds nothing left to flip.
+  const existing = await Ride.findOne({ _id: rideId, driverId });
+
+  if (!existing) {
+    stopDispatchFlow(rideId);
+    return null;
+  }
+
+  const scheduledAt = existing?.scheduledAt ? new Date(existing.scheduledAt) : null;
+  const isScheduledRide =
+    scheduledAt && Number.isFinite(scheduledAt.getTime()) && scheduledAt.getTime() > Date.now();
+
+  if (isParcelCancel) {
+    if (String(existing.serviceType || '') !== 'parcel') {
+      throw new Error('Only parcel deliveries can be cancelled from the active trip');
+    }
+    if (isParcelPastPickupOtp(existing)) {
+      throw new Error('The parcel is already picked up - it can no longer be cancelled');
+    }
+  } else if (!isScheduledRide) {
+    stopDispatchFlow(rideId);
+    throw new Error('Only upcoming scheduled rides can be cancelled by the driver');
+  }
+
+  if (existing.status === RIDE_STATUS.COMPLETED || existing.liveStatus === RIDE_LIVE_STATUS.COMPLETED) {
+    stopDispatchFlow(rideId);
+    throw new Error('Completed rides cannot be cancelled');
+  }
+
+  if (existing.status === RIDE_STATUS.CANCELLED || existing.liveStatus === RIDE_LIVE_STATUS.CANCELLED) {
+    stopDispatchFlow(rideId);
+    return existing;
+  }
+
+  if (existing.status === RIDE_STATUS.ONGOING) {
+    stopDispatchFlow(rideId);
+    throw new Error('This trip has already started and cannot be cancelled');
+  }
+
+  // The driver drops out, not the booking: the ride goes back to searching and
+  // on to the next driver. It only ends if nobody can be found.
+  const reassignUpdate = {
+    status: RIDE_STATUS.SEARCHING,
+    liveStatus: RIDE_LIVE_STATUS.SEARCHING,
+    driverId: null,
+    acceptedAt: null,
+    arrivedAt: null,
+  };
+  if (existing.bookingMode === 'bidding') {
+    reassignUpdate.biddingStatus = 'open';
+    reassignUpdate.acceptedBidId = null;
+  }
+
+  const ride = await Ride.findOneAndUpdate(
+    {
+      _id: rideId,
+      driverId,
+      status: { $nin: [RIDE_STATUS.CANCELLED, RIDE_STATUS.COMPLETED, RIDE_STATUS.ONGOING] },
+      liveStatus: { $nin: [RIDE_LIVE_STATUS.CANCELLED, RIDE_LIVE_STATUS.COMPLETED] },
+    },
+    { $set: reassignUpdate },
+    { new: true },
+  );
+
+  if (!ride) {
+    stopDispatchFlow(rideId);
+    return Ride.findOne({ _id: rideId, driverId });
+  }
+
+  outcome.cancelled = true;
+
+  // Charged against the ride as the driver held it, since it no longer has one.
   let cancellationSettlement = null;
-
   try {
-    session.startTransaction();
+    cancellationSettlement = await settleDriverCancellationFee(existing);
+  } catch (error) {
+    console.error('Could not settle the driver cancellation fee', error);
+  }
 
-    ride = await Ride.findOne({ _id: rideId, driverId }).session(session);
-
-    if (!ride) {
-      await session.abortTransaction();
-      stopDispatchFlow(rideId);
-      return null;
-    }
-
-    const scheduledAt = ride?.scheduledAt ? new Date(ride.scheduledAt) : null;
-    const isScheduledRide = scheduledAt && Number.isFinite(scheduledAt.getTime()) && scheduledAt.getTime() > Date.now();
-
-    if (!isScheduledRide) {
-      throw new Error('Only upcoming scheduled rides can be cancelled by the driver');
-    }
-
-    if (ride.status === RIDE_STATUS.COMPLETED || ride.liveStatus === RIDE_LIVE_STATUS.COMPLETED) {
-      throw new Error('Completed rides cannot be cancelled');
-    }
-
-    if (ride.status === RIDE_STATUS.CANCELLED || ride.liveStatus === RIDE_LIVE_STATUS.CANCELLED) {
-      await session.commitTransaction();
-      stopDispatchFlow(rideId);
-      return ride;
-    }
-
-    cancellationSettlement = await settleDriverCancellationFee(ride, session);
-
-    ride.status = RIDE_STATUS.CANCELLED;
-    ride.liveStatus = RIDE_LIVE_STATUS.CANCELLED;
-    if (ride.bookingMode === 'bidding') {
-      ride.biddingStatus = 'cancelled';
-    }
-    await ride.save({ session });
-
-    if (ride.deliveryId) {
-      await Delivery.findByIdAndUpdate(ride.deliveryId, {
-        driverId: ride.driverId || null,
+  await Promise.all([
+    ride.deliveryId
+      ? Delivery.findByIdAndUpdate(ride.deliveryId, {
+        driverId: null,
         status: ride.status,
         liveStatus: ride.liveStatus,
-      }, { session });
-    }
+      })
+      : Promise.resolve(),
+    Driver.findByIdAndUpdate(driverId, { isOnRide: false }),
+  ]);
 
-    await Promise.all([
-      User.findByIdAndUpdate(ride.userId, { currentRideId: null }, { session }),
-      ride.driverId ? Driver.findByIdAndUpdate(ride.driverId, { isOnRide: false }, { session }) : Promise.resolve(),
-    ]);
-
-    await session.commitTransaction();
-  } catch (error) {
-    await session.abortTransaction();
-    stopDispatchFlow(rideId);
-    throw error;
-  } finally {
-    session.endSession();
-  }
+  // Everyone who already said no, plus this driver, stays out of the new search.
+  const earlierRejections = (existing.dispatchTracking?.rejectedDriverIds || []).map(String);
   await persistDispatchTrackingProgress({ rideId, reset: true }).catch(() => null);
+  await persistDispatchTrackingProgress({
+    rideId,
+    rejectedDriverIds: [...earlierRejections, String(driverId)],
+  }).catch(() => null);
 
-  const cancelReason = 'Your scheduled ride was cancelled by the driver.';
-
-  emitToRoom(getUserRoom(ride.userId), 'rideCancelled', {
-    rideId: String(ride._id),
-    room: getRideRoom(ride._id),
-    reason: cancelReason,
-  });
-
-  emitToRoom(getRideRoom(ride._id), 'rideRequestClosed', {
-    rideId: String(ride._id),
-    reason: 'driver-cancelled',
-    message: cancelReason,
-  });
-
-  if (ride.driverId) {
-    emitToRoom(getDriverRoom(ride.driverId), 'rideRequestClosed', {
-      rideId: String(ride._id),
-      reason: 'driver-cancelled',
-      message: 'Scheduled ride cancelled.',
-    });
-  }
-
-  for (const notifiedDriverId of dispatchState.notifiedDriverIds) {
-    emitToDriver(notifiedDriverId, 'rideRequestClosed', {
-      rideId: String(ride._id),
-      reason: 'driver-cancelled',
-      message: cancelReason,
-    });
-  }
+  const userMessage = isParcelCancel
+    ? 'Your delivery partner cancelled. We are finding you another one.'
+    : 'Your driver cancelled. We are finding you another driver.';
 
   emitToRoom(getRideRoom(ride._id), SOCKET_EVENTS.RIDE_STATUS_UPDATED, {
     rideId: String(ride._id),
     status: ride.status,
     liveStatus: ride.liveStatus,
+    message: userMessage,
+  });
+
+  emitToRoom(getDriverRoom(driverId), 'rideRequestClosed', {
+    rideId: String(ride._id),
+    reason: 'driver-cancelled',
+    message: isParcelCancel ? 'Parcel delivery cancelled.' : 'Scheduled ride cancelled.',
   });
 
   if (cancellationSettlement?.driverWalletResult?.transaction) {
-    emitToDriver(ride.driverId, 'driver:wallet:updated', {
+    emitToDriver(driverId, 'driver:wallet:updated', {
       wallet: cancellationSettlement.driverWalletResult.wallet,
       transaction: cancellationSettlement.driverWalletResult.transaction,
       notification: {
-        id: `ride-cancel-debit-${String(ride._id)}`,
+        id: `ride-cancel-debit-${String(ride._id)}-${String(driverId)}`,
         title: 'Cancellation fee charged',
-        body: `Rs ${Number(cancellationSettlement.feeAmount || 0).toFixed(2)} deducted for scheduled ride cancellation.`,
+        body: `Rs ${Number(cancellationSettlement.feeAmount || 0).toFixed(2)} deducted for ${isParcelCancel ? 'parcel' : 'scheduled ride'} cancellation.`,
         sentAt: new Date().toISOString(),
       },
     });
@@ -1128,18 +1390,21 @@ export const cancelScheduledRideByDriver = async ({ rideId, driverId }) => {
 
   sendPushNotificationToEntities({
     userIds: [String(ride.userId)],
-    title: 'Scheduled ride cancelled',
-    body: cancelReason,
+    title: isParcelCancel ? 'Finding you another delivery partner' : 'Finding you another driver',
+    body: userMessage,
     data: {
-      type: 'ride_cancelled_by_driver',
+      type: 'ride_driver_changed',
       rideId: String(ride._id),
       serviceType: ride.serviceType || 'ride',
     },
   }).catch((error) => {
-    console.error('Failed to send user scheduled-ride cancellation push notification', error);
+    console.error('Failed to send user driver-changed push notification', error);
   });
 
-  stopDispatchFlow(rideId);
+  // The driver is already off the ride, so a search that fails to start mustn't fail their cancel.
+  await startDispatchFlow(ride, { forceRestart: true }).catch((error) => {
+    console.error('Could not restart dispatch after a driver cancelled', error);
+  });
   return ride;
 };
 
@@ -1153,12 +1418,12 @@ const scheduleNextAttempt = (rideId, nextAttemptIndex, retryDelayMs) => {
   saveDispatchState(rideId, { timer });
 };
 
-const getAttemptRadiusMeters = (baseDistanceMeters, attemptIndex) => {
-  const safeBaseDistance = Math.max(1000, Number(baseDistanceMeters) || 0);
-  const growthMultiplier = Math.min(1 + (Math.max(0, attemptIndex) * 0.5), 3);
-
-  return Math.round(safeBaseDistance * growthMultiplier);
-};
+// The admin's "driver search radius" is the furthest a ride is ever offered.
+// Retries search again within it (drivers come online and move closer), but
+// never further out - it used to grow by half each retry, up to 3x, so a 5 km
+// setting reached drivers 8-15 km away.
+const getAttemptRadiusMeters = (baseDistanceMeters) =>
+  Math.round(Math.max(1000, Number(baseDistanceMeters) || 0));
 
 const dispatchAttempt = async (rideId, attemptIndex = 0) => {
   const ownsDispatch = await ensureDispatchLease(rideId);
@@ -1167,7 +1432,7 @@ const dispatchAttempt = async (rideId, attemptIndex = 0) => {
     return;
   }
 
-  const ride = await Ride.findById(rideId).populate('userId', 'name phone countryCode');
+  const ride = await Ride.findById(rideId).populate('userId', 'name phone countryCode profileImage');
 
   if (!ride || ride.status !== RIDE_STATUS.SEARCHING) {
     stopDispatchFlow(rideId);
@@ -1176,7 +1441,9 @@ const dispatchAttempt = async (rideId, attemptIndex = 0) => {
 
   try {
     const dispatchState = hydrateDispatchStateFromRide(ride);
-    const dispatchConfig = await resolveTransportDispatchConfig();
+    const dispatchConfig = await resolveTransportDispatchConfig({
+      bidding: ride.pricingNegotiationMode === 'driver_bid',
+    });
     const radius = getAttemptRadiusMeters(
       dispatchConfig.baseDistanceMeters || dispatchConfig.maxDistanceMeters,
       attemptIndex,
@@ -1190,6 +1457,7 @@ const dispatchAttempt = async (rideId, attemptIndex = 0) => {
       ride,
       radius,
       dispatchVehicleTypeIds,
+      excludeDriverIds: [...dispatchState.notifiedDriverIds, ...dispatchState.rejectedDriverIds],
     });
     const effectiveRadius = Number.isFinite(searchRadiusMeters) && searchRadiusMeters > 0
       ? searchRadiusMeters
@@ -1284,7 +1552,13 @@ export const startDispatchFlow = async (ride, { forceRestart = false } = {}) => 
   }
 
   const scheduledAt = ride?.scheduledAt ? new Date(ride.scheduledAt) : null;
-  const delayMs = scheduledAt ? scheduledAt.getTime() - Date.now() : 0;
+  // Start searching a lead window before the scheduled pickup, so a captain is
+  // lined up ahead of time instead of only when the trip is already due. If the
+  // lead window has already passed (e.g. a trip booked for 10 minutes out),
+  // delayMs goes <= 0 and we fall through to dispatching immediately.
+  const delayMs = scheduledAt
+    ? scheduledAt.getTime() - SCHEDULED_DISPATCH_LEAD_MS - Date.now()
+    : 0;
   const bookingMode = String(ride?.bookingMode || 'normal').trim().toLowerCase();
   const shouldDispatchImmediately = bookingMode === 'bidding';
 
@@ -1312,6 +1586,10 @@ export const restoreScheduledDispatches = async () => {
   const rides = await Ride.find({
     status: RIDE_STATUS.SEARCHING,
     liveStatus: RIDE_LIVE_STATUS.SEARCHING,
+    // Website booking enquiries carry a placeholder pickup point, so dispatching
+    // them searches an arbitrary location, finds nobody, and auto-cancels the
+    // request before anyone in admin has seen it.
+    bookingSource: { $ne: 'website' },
   }).select('_id scheduledAt bookingMode dispatchTracking');
 
   for (const ride of rides) {
@@ -1362,16 +1640,20 @@ export const notifyLateAvailableDriver = async (driverId) => {
       return;
     }
 
-    const dispatchConfig = await resolveTransportDispatchConfig();
     const activeRideIds = Array.from(activeDispatches.keys());
 
     for (const rideId of activeRideIds) {
-      const ride = await Ride.findById(rideId).populate('userId', 'name phone countryCode');
+      const ride = await Ride.findById(rideId).populate('userId', 'name phone countryCode profileImage');
 
       if (!ride || ride.status !== RIDE_STATUS.SEARCHING) {
         continue;
       }
 
+      // Per ride, not once for the loop: a ride being bid on runs on the
+      // admin's bidding timers rather than the regular ride's.
+      const dispatchConfig = await resolveTransportDispatchConfig({
+        bidding: ride.pricingNegotiationMode === 'driver_bid',
+      });
       const dispatchState = getDispatchState(rideId);
 
       if (
@@ -1391,6 +1673,7 @@ export const notifyLateAvailableDriver = async (driverId) => {
         ride,
         radius,
         dispatchVehicleTypeIds,
+        excludeDriverIds: [...dispatchState.notifiedDriverIds, ...dispatchState.rejectedDriverIds],
       });
 
       const matchedDriver = drivers.find((item) => String(item._id) === driverKey);
@@ -1435,6 +1718,18 @@ export const notifyLateAvailableDriver = async (driverId) => {
 
 export const notifyRideAccepted = async (ride) => {
   const state = getDispatchState(ride._id);
+  // Everyone this ride was offered to. The in-memory list only exists on the
+  // API process that ran the dispatch, and an accept can land on any of them,
+  // so it was usually empty and the other drivers kept the offer on screen
+  // after someone else took the ride. The ride's own record is complete; it
+  // is read here, before the reset below clears it.
+  const tracked = await Ride.findById(ride._id).select('dispatchTracking').lean().catch(() => null);
+  const offeredDriverIds = [
+    ...new Set([
+      ...(state.notifiedDriverIds || []),
+      ...getPersistedDispatchTracking(tracked || {}).notifiedDriverIds,
+    ].map(String)),
+  ];
   stopDispatchFlow(ride._id);
   await persistDispatchTrackingProgress({ rideId: ride._id, reset: true }).catch(() => null);
 
@@ -1462,42 +1757,22 @@ export const notifyRideAccepted = async (ride) => {
     parcel: populatedRide.parcel || null,
   });
 
-  emitToRoom(getUserRoom(populatedRide.userId), SOCKET_EVENTS.RIDE_STATE, {
-    rideId: String(populatedRide._id),
-    room: getRideRoom(populatedRide._id),
-    type: populatedRide.serviceType || 'ride',
-    serviceType: populatedRide.serviceType || 'ride',
-    status: populatedRide.status,
-    liveStatus: populatedRide.liveStatus,
-    fare: populatedRide.fare,
-    estimatedDistanceMeters: populatedRide.estimatedDistanceMeters || 0,
-    estimatedDurationMinutes: populatedRide.estimatedDurationMinutes || 0,
-    paymentMethod: populatedRide.paymentMethod,
-    otp: populatedRide.otp || '',
-    vehicleIconType: populatedRide.vehicleIconType || '',
-    vehicleIconUrl: populatedRide.vehicleIconUrl || '',
-    parcel: populatedRide.parcel || null,
-    intercity: populatedRide.intercity || null,
-    commissionAmount: populatedRide.commissionAmount,
-    driverEarnings: populatedRide.driverEarnings,
-    pickupLocation: populatedRide.pickupLocation,
-    pickupAddress: populatedRide.pickupAddress || '',
-    dropLocation: populatedRide.dropLocation,
-    dropAddress: populatedRide.dropAddress || '',
-    acceptedAt: populatedRide.acceptedAt,
-    startedAt: populatedRide.startedAt,
-    completedAt: populatedRide.completedAt,
-    lastDriverLocation: populatedRide.lastDriverLocation?.coordinates?.length
-      ? {
-          type: populatedRide.lastDriverLocation.type,
-          coordinates: populatedRide.lastDriverLocation.coordinates,
-          heading: populatedRide.lastDriverLocation.heading,
-          speed: populatedRide.lastDriverLocation.speed,
-          updatedAt: populatedRide.lastDriverLocation.updatedAt,
-        }
-      : null,
-    driver: populatedRide.driverId,
-  });
+  // The full ride, as every other ride:state carries. The rider app replaces
+  // its ride with this payload, and the hand-picked fields here dropped the
+  // tolls, route, payment state and chat until the next poll.
+  const fullRide = await getRideDetails(populatedRide._id).catch(() => null);
+  emitToRoom(
+    getUserRoom(populatedRide.userId),
+    SOCKET_EVENTS.RIDE_STATE,
+    fullRide ? serializeRideRealtime(fullRide) : {
+      rideId: String(populatedRide._id),
+      room: getRideRoom(populatedRide._id),
+      status: populatedRide.status,
+      liveStatus: populatedRide.liveStatus,
+      fare: populatedRide.fare,
+      driver: populatedRide.driverId,
+    },
+  );
 
   emitToRoom(getRideRoom(populatedRide._id), SOCKET_EVENTS.RIDE_STATUS_UPDATED, {
     rideId: String(populatedRide._id),
@@ -1518,17 +1793,22 @@ export const notifyRideAccepted = async (ride) => {
   emitToRoom(getRideRoom(populatedRide._id), 'rideRequestClosed', {
     rideId: String(populatedRide._id),
         acceptedDriverId: String(populatedRide.driverId._id),
-        notifiedDriverIds: state.notifiedDriverIds,
+        notifiedDriverIds: offeredDriverIds,
         reason: 'accepted-by-another-driver',
   });
 
-  for (const driverId of state.notifiedDriverIds) {
+  const acceptedDriverId = String(populatedRide.driverId._id);
+  const otherDriverIds = offeredDriverIds.filter((driverId) => driverId !== acceptedDriverId);
+  for (const driverId of otherDriverIds) {
     emitToDriver(driverId, 'rideRequestClosed', {
       rideId: String(populatedRide._id),
-      acceptedDriverId: String(populatedRide.driverId._id),
+      acceptedDriverId,
       reason: 'accepted-by-another-driver',
     });
   }
+  // The socket only reaches an app that is awake; the full-screen offer card
+  // on a backgrounded phone closes on this push.
+  sendRideOfferClosedPush(otherDriverIds, populatedRide._id);
 
   sendPushNotificationToEntities({
     userIds: [String(populatedRide.userId)],

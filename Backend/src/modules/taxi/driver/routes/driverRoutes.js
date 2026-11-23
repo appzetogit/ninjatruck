@@ -1,6 +1,12 @@
 import { Router } from "express";
+import {
+  buySubscription,
+  getMySubscription,
+  getMySubscriptionHistory,
+} from "../controllers/driverSubscriptionController.js";
 import { asyncHandler } from "../../../../utils/asyncHandler.js";
 import { authenticate } from "../../middlewares/authMiddleware.js";
+import { answerRideOffer, getPendingRideOffers } from "../controllers/rideOfferController.js";
 import {
   loginRateLimit,
   otpSendRateLimit,
@@ -10,9 +16,25 @@ import {
 import {
   addDriverEmergencyContact,
   completeOnboarding,
+  createOwnerBusReservation,
   createOwnerBusService,
   cancelOwnerBusBookingSeats,
+  blockOwnerBusSeats,
+  releaseOwnerBusSeatBlocks,
+  setOwnerBusBoarding,
+  setOwnerBusCollection,
+  getOwnerBusBookingTicket,
+  holdOwnerBusSeats,
+  payOwnerBusBookingFromWallet,
+  createOwnerBusBookingPaymentOrder,
+  verifyOwnerBusBookingPayment,
+  releaseOwnerBusBookingHold,
+  getOwnerBusWallet,
+  createOwnerBusWalletTopUp,
+  verifyOwnerBusWalletTopUp,
   createDriverPaymentQr,
+  getDriverPaymentUpi,
+  saveDriverPaymentUpi,
   handleDriverRazorpayWalletTopupCallback,
   createServiceCenterStaffMember,
   enrollServiceCenterStaffBiometric,
@@ -67,6 +89,7 @@ import {
   getOwnerFleetZones,
   getOwnerBusBookingCalendar,
   getOwnerBusBookings,
+  getOwnerBusSeatLayout,
   getMyWallet,
   getOnboardingSession,
   getOnboardingSignupOptions,
@@ -118,6 +141,9 @@ import {
   uploadPoolingOnboardingImageRequest,
 } from "../controllers/driverController.js";
 import { triggerDriverSosAlert } from '../../safety/controllers/safetyController.js';
+import { listActiveSurges } from '../../services/surgeService.js';
+import { Driver } from '../models/Driver.js';
+import { getOpportunityMap } from '../../services/opportunityMapService.js';
 
 export const driverRouter = Router();
 
@@ -154,6 +180,20 @@ driverRouter.post(
 driverRouter.post(
   "/pooling/onboarding/upload-image",
   asyncHandler(uploadPoolingOnboardingImageRequest),
+);
+// Offers dispatched to this driver that the socket may have missed. Polled by
+// the app on reconnect and on every `ride_request` push, so a dropped socket
+// no longer means a lost ride.
+driverRouter.get(
+  "/ride-offers",
+  authenticate(["driver"]),
+  asyncHandler(getPendingRideOffers),
+);
+// The lock-screen card answers here (native code, no socket).
+driverRouter.post(
+  "/ride-offers/:rideId/:action(accept|reject)",
+  authenticate(["driver"]),
+  answerRideOffer,
 );
 driverRouter.get(
   "/me",
@@ -322,11 +362,9 @@ driverRouter.post(
   authenticate(["driver"]),
   asyncHandler(claimDriverIncentiveReward),
 );
-driverRouter.post(
-  "/wallet/top-up",
-  authenticate(["driver"]),
-  asyncHandler(topUpMyWallet),
-);
+// No "POST /wallet/top-up": it credited whatever amount the driver sent, with
+// no payment behind it. Top-ups go through the Razorpay / PhonePe routes below,
+// which credit only a verified payment.
 driverRouter.post(
   "/wallet/top-up/razorpay/callback",
   asyncHandler(handleDriverRazorpayWalletTopupCallback),
@@ -363,6 +401,16 @@ driverRouter.post(
   asyncHandler(createDriverWithdrawalRequest),
 );
 
+driverRouter.get(
+  "/me/payment-upi",
+  authenticate(["driver"]),
+  asyncHandler(getDriverPaymentUpi),
+);
+driverRouter.patch(
+  "/me/payment-upi",
+  authenticate(["driver"]),
+  asyncHandler(saveDriverPaymentUpi),
+);
 driverRouter.post(
   "/payments/qr",
   authenticate(["driver"]),
@@ -386,18 +434,28 @@ driverRouter.get(
 );
 driverRouter.get(
   "/fleet/bus-services",
-  authenticate(["owner"]),
+  authenticate(["owner", "bus_driver"]),
   asyncHandler(listOwnerBusServices),
 );
 driverRouter.get(
   "/fleet/bus-bookings",
-  authenticate(["owner"]),
+  authenticate(["owner", "bus_driver"]),
   asyncHandler(getOwnerBusBookings),
 );
 driverRouter.get(
   "/fleet/bus-bookings/calendar",
   authenticate(["owner"]),
   asyncHandler(getOwnerBusBookingCalendar),
+);
+driverRouter.get(
+  "/fleet/bus-services/:id/seats",
+  authenticate(["owner", "bus_driver"]),
+  asyncHandler(getOwnerBusSeatLayout),
+);
+driverRouter.post(
+  "/fleet/bus-services/:id/reservations",
+  authenticate(["owner", "bus_driver"]),
+  asyncHandler(createOwnerBusReservation),
 );
 driverRouter.post(
   "/fleet/bus-services",
@@ -416,8 +474,47 @@ driverRouter.delete(
 );
 driverRouter.post(
   "/fleet/bus-bookings/:id/cancel",
-  authenticate(["owner"]),
+  authenticate(["owner", "bus_driver"]),
   asyncHandler(cancelOwnerBusBookingSeats),
+);
+// Prepaid counter seats: hold for 10 minutes, pay from the wallet or online.
+for (const [method, path, handler] of [
+  ["post", "/fleet/bus-services/:id/reservations/hold", holdOwnerBusSeats],
+  ["post", "/fleet/bus-bookings/:id/pay-wallet", payOwnerBusBookingFromWallet],
+  ["post", "/fleet/bus-bookings/:id/pay-order", createOwnerBusBookingPaymentOrder],
+  ["post", "/fleet/bus-bookings/:id/pay-verify", verifyOwnerBusBookingPayment],
+  ["post", "/fleet/bus-bookings/:id/release", releaseOwnerBusBookingHold],
+  ["get", "/fleet/bus-wallet", getOwnerBusWallet],
+  ["post", "/fleet/bus-wallet/topup-order", createOwnerBusWalletTopUp],
+  ["post", "/fleet/bus-wallet/topup-verify", verifyOwnerBusWalletTopUp],
+]) {
+  driverRouter[method](path, authenticate(["owner", "bus_driver"]), asyncHandler(handler));
+}
+// The bus vendor panel: take seats off sale for a trip, and mark bookings.
+driverRouter.post(
+  "/fleet/bus-services/:id/seat-blocks",
+  authenticate(["owner", "bus_driver"]),
+  asyncHandler(blockOwnerBusSeats),
+);
+driverRouter.post(
+  "/fleet/bus-services/:id/seat-blocks/release",
+  authenticate(["owner", "bus_driver"]),
+  asyncHandler(releaseOwnerBusSeatBlocks),
+);
+driverRouter.patch(
+  "/fleet/bus-bookings/:id/boarding",
+  authenticate(["owner", "bus_driver"]),
+  asyncHandler(setOwnerBusBoarding),
+);
+driverRouter.patch(
+  "/fleet/bus-bookings/:id/collection",
+  authenticate(["owner", "bus_driver"]),
+  asyncHandler(setOwnerBusCollection),
+);
+driverRouter.get(
+  "/fleet/bus-bookings/:id/ticket",
+  authenticate(["owner", "bus_driver"]),
+  asyncHandler(getOwnerBusBookingTicket),
 );
 driverRouter.get(
   "/fleet/drivers",
@@ -573,8 +670,10 @@ driverRouter.get(
   "/vehicle-field-templates",
   asyncHandler(getDriverVehicleFieldTemplates),
 );
-driverRouter.post("/onboarding/send-otp", asyncHandler(startOnboarding));
-driverRouter.post("/onboarding/verify-otp", asyncHandler(verifyOnboardingOtp));
+// Limited like every other OTP route. These two were not: anyone could send
+// unlimited SMS (each one paid for), and guess the 4-digit code with no cap.
+driverRouter.post("/onboarding/send-otp", otpSendRateLimit, asyncHandler(startOnboarding));
+driverRouter.post("/onboarding/verify-otp", otpVerifyRateLimit, asyncHandler(verifyOnboardingOtp));
 driverRouter.patch("/onboarding/role", asyncHandler(saveOnboardingRole));
 driverRouter.get("/onboarding/signup-options", asyncHandler(getOnboardingSignupOptions));
 driverRouter.patch("/onboarding/role-details", asyncHandler(saveOnboardingRoleDetails));
@@ -601,7 +700,45 @@ driverRouter.get(
   "/onboarding/session/:registrationId",
   asyncHandler(getOnboardingSession),
 );
+// The daily pass: what it costs, buying it, and what has been paid before.
+driverRouter.get("/subscription", authenticate(["driver"]), asyncHandler(getMySubscription));
+driverRouter.post("/subscription/purchase", authenticate(["driver"]), asyncHandler(buySubscription));
+driverRouter.get("/subscription/history", authenticate(["driver"]), asyncHandler(getMySubscriptionHistory));
+
 driverRouter.patch("/online", authenticate(["driver"]), asyncHandler(goOnline));
+// Surge hexagons near the driver, for the "Surge Fare Area" map: each carries
+// its outline, multiplier and minutes left, so the app can draw it without H3.
+driverRouter.get(
+  "/surge-map",
+  authenticate(["driver"]),
+  asyncHandler(async (req, res) => {
+    const lat = Number(req.query.lat ?? req.query.latitude);
+    const lng = Number(req.query.lng ?? req.query.longitude);
+    const radiusKm = Math.min(50, Math.max(1, Number(req.query.radius_km) || 15));
+    // Surge is set per vehicle type: show the driver their own vehicles'.
+    const driver = await Driver.findById(req.auth.sub).select("vehicleTypeId vehicleTypeIds").lean();
+    const vehicleTypeIds = [driver?.vehicleTypeId, ...(driver?.vehicleTypeIds || [])].filter(Boolean).map(String);
+    const results = await listActiveSurges({ lat, lng, radiusKm, vehicleTypeIds });
+    res.json({ success: true, data: { results, refreshed_at: new Date().toISOString() } });
+  }),
+);
+// The surge & demand map: surging and busy hexagons near the driver, the best
+// few places to go with what a trip pays there, and airport demand. Read-only
+// over what the surge engine already computed - looking never moves a price.
+// Contract: docs/surge-heatmap-implementation.md in the driver app repo.
+driverRouter.get(
+  "/opportunity-map",
+  authenticate(["driver"]),
+  asyncHandler(async (req, res) => {
+    const data = await getOpportunityMap({
+      driverId: req.auth?.sub,
+      lat: req.query.lat ?? req.query.latitude,
+      lng: req.query.lng ?? req.query.longitude,
+      radiusKm: req.query.radius_km,
+    });
+    res.json({ success: true, data });
+  }),
+);
 driverRouter.patch(
   "/offline",
   authenticate(["driver"]),

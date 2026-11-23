@@ -13,6 +13,25 @@ import { WithdrawalRequest } from "../../admin/models/WithdrawalRequest.js";
 import { Ride } from "../../user/models/Ride.js";
 import { BusBooking } from "../../user/models/BusBooking.js";
 import { BusSeatHold } from "../../user/models/BusSeatHold.js";
+import { clearExpiredHoldsForSeats, publishBusSeatChange } from "../../bus/services/busSeatSyncService.js";
+import { busTripBookingProblem, priceBusSeats } from "../../bus/utils/busTime.js";
+import { finalizeBusBookingPayment, withBusCancellationClaim } from "../../bus/services/busPaymentService.js";
+import {
+  VENDOR_HOLD_MINUTES,
+  VENDOR_WALLET_PROVIDER,
+  createVendorTopUpOrder,
+  getVendorWallet,
+  isVendorPrepaidRequired,
+  payHeldBookingFromWallet,
+  refundSeatsToVendorWallet,
+  releaseHeldBooking,
+  vendorAccountFromAuth,
+  verifyVendorTopUp,
+} from "../../bus/services/busVendorWalletService.js";
+import { publishBusLiveLocation } from "../../bus/services/busTicketService.js";
+import { getLadiesNeighbourSeatIds } from "../../services/busFemaleTravellersService.js";
+import { resolveScheduleRoute } from "../../bus/utils/busRoutes.js";
+import { cancelAndRefundFoodForBooking } from "../../bus/services/dhabaService.js";
 import { Owner } from "../../admin/models/Owner.js";
 import { BusService } from "../../admin/models/BusService.js";
 import { PoolingVehicle } from "../../admin/models/PoolingVehicle.js";
@@ -28,12 +47,13 @@ import { AdminBusinessSetting } from "../../admin/models/AdminBusinessSetting.js
 import { Notification } from "../../admin/promotions/models/Notification.js";
 import { FleetVehicle } from "../../admin/models/FleetVehicle.js";
 import { Zone } from "../models/Zone.js";
-import { uploadDataUrlToCloudinary } from "../../../../utils/cloudinaryUpload.js";
+import { uploadDataUrl } from "../../../../utils/fileUpload.js";
 import {
   comparePassword,
   hashPassword,
   signAccessToken,
 } from "../services/authService.js";
+import { getDriverCancelStatus } from "../../services/driverCancelLimitService.js";
 import { cancelScheduledRideByDriver, emitToDriver } from "../../services/dispatchService.js";
 import { notifyLateAvailableDriver } from "../../services/dispatchService.js";
 import { findZoneByPickup } from "../services/locationService.js";
@@ -705,6 +725,14 @@ const serializeOwnerBusBooking = (booking = {}) => {
       paidAt: booking.payment?.paidAt || null,
     },
     cancellation: booking.cancellation || {},
+    pnr: booking.pnr || "",
+    expiresAt: booking.status === "pending" ? booking.expiresAt || null : null,
+    paidFromWallet: booking.payment?.provider === VENDOR_WALLET_PROVIDER && booking.status !== "pending",
+    boarding: {
+      boardedAt: booking.boarding?.boardedAt || null,
+      noShowAt: booking.boarding?.noShowAt || null,
+    },
+    counterPayment: { method: booking.counterPayment?.method || "" },
     routeSnapshot: booking.routeSnapshot || {},
     user: booking.userId
       ? {
@@ -748,7 +776,7 @@ const resolveOwnerBusSeatPrice = (busService = {}, seat = {}) => {
   const variantPricing = busService?.variantPricing || {};
   const defaultPrice = Number(busService?.seatPrice || 0);
   const variantKey = String(seat?.variant || "seat").trim().toLowerCase();
-  const resolvedPrice = variantPricing?.[variantKey] ?? variantPricing?.seat ?? defaultPrice;
+  const resolvedPrice = positivePrice(variantPricing?.[variantKey]) ?? positivePrice(variantPricing?.seat) ?? defaultPrice;
 
   return Number.isFinite(Number(resolvedPrice)) ? Number(resolvedPrice) : defaultPrice;
 };
@@ -827,7 +855,6 @@ const buildOwnerBusPartialCancellationQuote = ({
   booking,
   busService,
   seatIds = [],
-  travelDateOverride = "",
   now = new Date(),
 }) => {
   const bookingSnapshot =
@@ -855,11 +882,19 @@ const buildOwnerBusPartialCancellationQuote = ({
     };
   }
 
+  // Each seat's own price when recorded (sleeper vs seater), else the average.
+  const seatPriceMap = new Map(
+    (Array.isArray(bookingSnapshot?.seatPrices) ? bookingSnapshot.seatPrices : [])
+      .map((item) => [toCleanString(item?.seatId), Number(item?.amount || 0)]),
+  );
   const perSeatAmount = Math.round((Number(bookingSnapshot?.amount || 0) / seatCount) * 100) / 100;
-  const partialAmount = Math.round(perSeatAmount * selectedCount * 100) / 100;
+  const partialAmount = Math.round(
+    selectedSeatIds.reduce((sum, seatId) => sum + (seatPriceMap.has(seatId) ? seatPriceMap.get(seatId) : perSeatAmount), 0) * 100,
+  ) / 100;
   const schedule = findBusSchedule(busService, booking?.scheduleId);
   const departureTime = schedule?.departureTime || booking?.routeSnapshot?.departureTime || "";
-  const resolvedTravelDate = toCleanString(travelDateOverride || booking?.travelDate);
+  // Always the booking's own date - never one sent with the request.
+  const resolvedTravelDate = toCleanString(booking?.travelDate);
   const departureDateTime = parseOwnerBusDateTime(resolvedTravelDate, departureTime);
   const rules = normalizeOwnerBusCancellationRules(busService?.cancellationRules);
   const amount = Math.max(0, partialAmount);
@@ -985,12 +1020,17 @@ const buildBusDriverSeatLayout = async ({ busService, scheduleId, travelDate }) 
     busServiceId: busService._id,
     scheduleId,
     travelDate,
-    status: { $in: ["held", "booked"] },
+    // Expired holds don't count, even before the sweeper removes them.
+    $or: [{ status: "booked" }, { status: "held", expiresAt: { $gt: new Date() } }],
   })
-    .select("seatId")
+    .select("seatId source bookingId")
     .lean();
 
   const reservedSeatIds = new Set(activeHolds.map((item) => String(item.seatId || "")));
+  const tripBlockedSeatIds = activeHolds
+    .filter((item) => item.source === VENDOR_BLOCK_SOURCE && !item.bookingId)
+    .map((item) => String(item.seatId || ""));
+  const ladiesNeighbourSeatIds = await getLadiesNeighbourSeatIds({ busService, scheduleId, travelDate });
 
   const normalizeDeck = (deckRows = []) =>
     (Array.isArray(deckRows) ? deckRows : []).map((row) =>
@@ -1012,12 +1052,15 @@ const buildBusDriverSeatLayout = async ({ busService, scheduleId, travelDate }) 
         return {
           ...cell,
           status: isBlocked || isReserved ? "booked" : "available",
+          ladiesOnly: cell.ladiesOnly === true || ladiesNeighbourSeatIds.has(seatId),
         };
       }),
     );
 
   const blueprint = {
     templateKey: busService.blueprint?.templateKey || "seater_2_2",
+    seatLayoutOrientation:
+      String(busService.blueprint?.seatLayoutOrientation || "").toLowerCase() === "vertical" ? "vertical" : "horizontal",
     lowerDeck: normalizeDeck(busService.blueprint?.lowerDeck || []),
     upperDeck: normalizeDeck(busService.blueprint?.upperDeck || []),
   };
@@ -1032,6 +1075,7 @@ const buildBusDriverSeatLayout = async ({ busService, scheduleId, travelDate }) 
     travelDate,
     availableSeats,
     blueprint,
+    tripBlockedSeatIds,
   };
 };
 
@@ -1137,18 +1181,6 @@ const getIstMonthKey = (value = new Date()) => {
   const year = shifted.getUTCFullYear();
   const month = String(shifted.getUTCMonth() + 1).padStart(2, "0");
   return `${year}-${month}`;
-};
-
-const getConfiguredAppName = async () => {
-  try {
-    const settings = await AdminBusinessSetting.findOne({ scope: "default" })
-      .select("general.app_name")
-      .lean();
-
-    return String(settings?.general?.app_name || "").trim() || "App";
-  } catch {
-    return "App";
-  }
 };
 
 const pruneDailyActivity = (items = []) =>
@@ -1484,16 +1516,6 @@ const razorpayRequest = async ({ method, path, body }) => {
   return payload;
 };
 
-const shouldFallbackToPaymentLinkQr = (error) => {
-  const message = String(error?.message || "").toLowerCase();
-
-  return (
-    error?.statusCode === 404 ||
-    message.includes("requested url was not found") ||
-    message.includes("qr") && message.includes("not") && message.includes("enabled")
-  );
-};
-
 const shouldFallbackToStandardPaymentLink = (error) => {
   const message = String(error?.message || "").toLowerCase();
 
@@ -1520,74 +1542,6 @@ const buildPaymentLinkBody = ({ amountInPaise, rideId, driverId, serviceType, ex
     fallback: upiLink ? "upi_payment_link_qr" : "standard_payment_link_qr",
   },
 });
-
-const createPaymentLinkQr = async ({ amountInPaise, rideId, driverId, serviceType }) => {
-  const referenceId = `ride_${String(rideId).slice(-18)}_${Date.now().toString(36)}`.slice(0, 40);
-  const expireBy = Math.floor(Date.now() / 1000) + 30 * 60;
-  let providerMode = "upi_payment_link_qr";
-  let paymentLink;
-
-  try {
-    paymentLink = await razorpayRequest({
-      method: "POST",
-      path: "/payment_links",
-      body: buildPaymentLinkBody({
-        amountInPaise,
-        rideId,
-        driverId,
-        serviceType,
-        expireBy,
-        referenceId,
-        upiLink: true,
-      }),
-    });
-  } catch (error) {
-    if (!shouldFallbackToStandardPaymentLink(error)) {
-      throw error;
-    }
-
-    providerMode = "standard_payment_link_qr";
-    paymentLink = await razorpayRequest({
-      method: "POST",
-      path: "/payment_links",
-      body: buildPaymentLinkBody({
-        amountInPaise,
-        rideId,
-        driverId,
-        serviceType,
-        expireBy,
-        referenceId: `${referenceId}_std`.slice(0, 40),
-        upiLink: false,
-      }),
-    });
-  }
-
-  const paymentUrl = paymentLink.short_url || paymentLink.shortUrl || paymentLink.url;
-
-  if (!paymentUrl) {
-    throw new ApiError(502, "Razorpay payment link was created without a payment URL");
-  }
-
-  const imageUrl = await QRCode.toDataURL(paymentUrl, {
-    errorCorrectionLevel: "M",
-    margin: 1,
-    scale: 8,
-  });
-
-  return {
-    id: paymentLink.id,
-    entity: paymentLink.entity || "payment_link",
-    status: paymentLink.status || "created",
-    imageUrl,
-    linkUrl: paymentUrl,
-    amount: amountInPaise / 100,
-    currency: "INR",
-    description: paymentLink.description,
-    closeBy: paymentLink.expire_by || expireBy,
-    rawStatus: paymentLink.status || "created",
-    providerMode,
-  };
-};
 
 const PAYMENT_PAID_STATUSES = new Set(["paid", "captured", "completed"]);
 const PAYMENT_OPEN_STATUSES = new Set(["created", "active", "issued", "partially_paid"]);
@@ -1647,7 +1601,9 @@ const refreshDriverPaymentCollection = async (ride) => {
   const collection = ride?.driverPaymentCollection || {};
   const providerId = String(collection.providerId || "").trim();
 
-  if (!providerId) {
+  // Paid into the driver's own UPI: there is no gateway to ask, the driver
+  // confirms receipt themselves.
+  if (!providerId || collection.providerMode === "driver_upi") {
     return serializeDriverPaymentCollection(collection);
   }
 
@@ -2888,6 +2844,7 @@ export const goOnline = async (req, res) => {
       zoneId: zone?._id || null,
       ...(existingDriver.owner_id ? { 'wallet.isBlocked': false } : {}),
       location: toPoint(coordinates, "location"),
+      locationUpdatedAt: new Date(),
       onlineSelfie: nextOnlineSelfie,
       incentiveTracking: {
         ...trackingBeforeOnline,
@@ -3019,6 +2976,9 @@ export const getCurrentDriver = async (req, res) => {
       gender: driver.gender,
       vehicleType: driver.vehicleType,
       vehicleTypeId: driver.vehicleTypeId,
+      // Every vehicle type the driver enrolled; vehicleTypeId is the first.
+      vehicleTypeIds: driver.vehicleTypeIds || [],
+      serviceCategories: driver.serviceCategories || [],
       vehicleIconType: driver.vehicleIconType,
       vehicleIconUrl,
       vehicleMake: driver.vehicleMake,
@@ -3212,6 +3172,7 @@ export const getDriverScheduledRides = async (req, res) => {
     success: true,
     data: {
       results: rides.map((ride) => serializeDriverScheduledRide(ride, req.auth.sub)),
+      cancellationLimit: await getDriverCancelStatus(req.auth.sub),
       totalCount,
       pagination: {
         page: safePage,
@@ -3248,6 +3209,7 @@ export const cancelDriverScheduledRide = async (req, res) => {
       rideId: String(ride._id || ""),
       status: ride.status || RIDE_STATUS.CANCELLED,
       liveStatus: ride.liveStatus || RIDE_LIVE_STATUS.CANCELLED,
+      cancellationLimit: await getDriverCancelStatus(req.auth.sub),
     },
   });
 };
@@ -3302,7 +3264,11 @@ export const saveDriverFcmToken = async (req, res) => {
     platform: req.body?.platform,
   });
 
-  await entity.save();
+  // validateModifiedOnly: this save must not be blocked by unrelated legacy
+  // fields already on the document (e.g. a driver's `vehicleType` recorded
+  // before the current enum) — only the token field just assigned needs to
+  // be valid, not the entire document.
+  await entity.save({ validateModifiedOnly: true });
 
   res.json({
     success: true,
@@ -5074,9 +5040,9 @@ export const updateServiceCenterBookingBiometrics = async (req, res) => {
 
       let imageUrl = normalizeBiometricPreviewImage(rawImage);
       if (imageUrl.startsWith("data:image/")) {
-        const uploaded = await uploadDataUrlToCloudinary({
+        const uploaded = await uploadDataUrl({
           dataUrl: imageUrl,
-          folder: `${env.cloudinary.folder}/service-center/booking-${String(booking._id || "").trim()}/thumbs`,
+          folder: `${env.uploads.folder}/service-center/booking-${String(booking._id || "").trim()}/thumbs`,
           publicIdPrefix: `thumb-${String(item?.participantKey || "participant").replace(/[^a-z0-9_-]/gi, "-").toLowerCase()}-${String(item?.thumbCode || "thumb").toLowerCase()}`,
         });
         imageUrl = uploaded.secureUrl;
@@ -5789,9 +5755,9 @@ export const getBusDriverSeatLayout = async (req, res) => {
       bus: {
         operatorName: busService.operatorName || "",
         busName: busService.busName || "",
-        routeName: busService.route?.routeName || "",
-        fromCity: busService.route?.originCity || "",
-        toCity: busService.route?.destinationCity || "",
+        routeName: resolveScheduleRoute(busService, schedule).routeName || "",
+        fromCity: resolveScheduleRoute(busService, schedule).originCity || "",
+        toCity: resolveScheduleRoute(busService, schedule).destinationCity || "",
         departureTime: schedule?.departureTime || "",
         arrivalTime: schedule?.arrivalTime || "",
       },
@@ -5854,19 +5820,46 @@ export const createBusDriverReservation = async (req, res) => {
     throw new ApiError(404, "Assigned bus service not found");
   }
 
-  const scheduleId = toCleanString(req.body?.scheduleId);
-  const travelDate = normalizeBusTravelDate(req.body?.travelDate || req.body?.date);
-  const seatIds = Array.isArray(req.body?.seatIds)
-    ? [...new Set(req.body.seatIds.map((item) => toCleanString(item)).filter(Boolean))]
+  const booking = await createManualBusReservation({
+    busService,
+    body: req.body,
+    bookedBy: {
+      userId: busDriver._id,
+      reservedByDriverId: busDriver._id,
+      bookingSource: "bus_driver",
+      codePrefix: "BDR",
+    },
+  });
+
+  res.status(201).json({
+    success: true,
+    data: serializeBusDriverBooking(booking),
+  });
+};
+
+/// A confirmed seat booking taken at the counter (cash, settled outside the
+/// app), by a conductor or the bus's owner. The seat locks are the same ones the
+/// rider app takes, so nobody can book a seat that was just sold.
+const createManualBusReservation = async ({ busService, body, bookedBy, rejectDepartedTrips = false, hold = false }) => {
+  // With prepaid counter seats switched on, seats are held first and booked
+  // only once paid (wallet or online); straight booking is refused.
+  if (!hold && (await isVendorPrepaidRequired())) {
+    throw new ApiError(409, "Seats must be paid for first. Hold the seats, then pay from your wallet or online.");
+  }
+
+  const scheduleId = toCleanString(body?.scheduleId);
+  const travelDate = normalizeBusTravelDate(body?.travelDate || body?.date);
+  const seatIds = Array.isArray(body?.seatIds)
+    ? [...new Set(body.seatIds.map((item) => toCleanString(item)).filter(Boolean))]
     : [];
   const passenger = {
-    name: toCleanString(req.body?.passenger?.name),
-    age: Number(req.body?.passenger?.age || 0),
-    gender: toCleanString(req.body?.passenger?.gender),
-    phone: normalizeBusPassengerPhone(req.body?.passenger?.phone),
-    email: normalizeEmail(req.body?.passenger?.email),
+    name: toCleanString(body?.passenger?.name),
+    age: Number(body?.passenger?.age || 0),
+    gender: toCleanString(body?.passenger?.gender),
+    phone: normalizeBusPassengerPhone(body?.passenger?.phone),
+    email: normalizeEmail(body?.passenger?.email),
   };
-  const notes = toCleanString(req.body?.notes);
+  const notes = toCleanString(body?.notes);
 
   if (!scheduleId || seatIds.length === 0) {
     throw new ApiError(400, "scheduleId and seatIds are required");
@@ -5885,6 +5878,17 @@ export const createBusDriverReservation = async (req, res) => {
     throw new ApiError(404, "Bus schedule not found for the selected date");
   }
 
+  if (rejectDepartedTrips) {
+    const tripProblem = busTripBookingProblem({
+      travelDate,
+      departureTime: schedule?.departureTime,
+      leadMinutes: 0,
+    });
+    if (tripProblem) {
+      throw new ApiError(409, tripProblem);
+    }
+  }
+
   const seatLayout = await buildBusDriverSeatLayout({ busService, scheduleId, travelDate });
   const availableSeatMap = new Map(
     flattenBusBlueprintSeats(seatLayout.blueprint)
@@ -5897,60 +5901,93 @@ export const createBusDriverReservation = async (req, res) => {
     throw new ApiError(409, `Seat ${invalidSeat} is not available`);
   }
 
-  const amount = Math.round(Number(busService.seatPrice || 0) * seatIds.length * 100) / 100;
+  // One passenger is recorded here, so their gender stands for every seat.
+  const ladiesSeat = seatIds.map((seatId) => availableSeatMap.get(seatId)).find((seat) => seat?.ladiesOnly === true);
+  if (ladiesSeat && passenger.gender.toLowerCase() !== "female") {
+    throw new ApiError(409, `Seat ${ladiesSeat.label || ladiesSeat.id} is for women only`);
+  }
+
+  // Same pricing as the rider app: each seat type's fare plus the bus's tax.
+  const pricing = priceBusSeats(busService, seatIds.map((seatId) => availableSeatMap.get(seatId)));
+  const amount = pricing.amount;
   const booking = await BusBooking.create({
-    userId: busDriver._id,
+    userId: bookedBy.userId || null,
     busServiceId: busService._id,
-    bookingCode: `BDR${Date.now().toString(36).toUpperCase()}${Math.random().toString(36).slice(2, 5).toUpperCase()}`,
+    bookingCode: `${bookedBy.codePrefix}${Date.now().toString(36).toUpperCase()}${Math.random().toString(36).slice(2, 5).toUpperCase()}`,
     scheduleId,
     travelDate,
     seatIds,
     seatLabels: seatIds.map((seatId) => availableSeatMap.get(seatId)?.label || seatId),
+    seatPrices: pricing.seatPrices,
     passenger,
     amount,
-    bookingSource: "bus_driver",
-    reservedByDriverId: busDriver._id,
+    bookingSource: bookedBy.bookingSource,
+    reservedByDriverId: bookedBy.reservedByDriverId || null,
     currency: busService.fareCurrency || "INR",
-    status: "confirmed",
-    expiresAt: null,
+    status: hold ? "pending" : "confirmed",
+    expiresAt: hold ? new Date(Date.now() + VENDOR_HOLD_MINUTES * 60 * 1000) : null,
     routeSnapshot: {
-      originCity: busService.route?.originCity || "",
-      destinationCity: busService.route?.destinationCity || "",
+      originCity: resolveScheduleRoute(busService, schedule).originCity || "",
+      destinationCity: resolveScheduleRoute(busService, schedule).destinationCity || "",
       departureTime: schedule?.departureTime || "",
       arrivalTime: schedule?.arrivalTime || "",
-      durationHours: busService.route?.durationHours || "",
+      durationHours: resolveScheduleRoute(busService, schedule).durationHours || "",
       busName: busService.busName || "",
       operatorName: busService.operatorName || "",
       coachType: busService.coachType || "",
       busCategory: busService.busCategory || "",
+      serviceTaxPercentage: pricing.serviceTaxPercentage,
+      baseAmount: pricing.baseAmount,
+      serviceTaxAmount: pricing.serviceTaxAmount,
+      totalAmount: pricing.amount,
     },
-    payment: {
-      provider: "manual",
-      orderId: "",
-      paymentId: "",
-      signature: "",
-      status: "manual_reserved",
-      paidAt: new Date(),
-    },
+    payment: hold
+      ? {
+          provider: VENDOR_WALLET_PROVIDER,
+          orderId: "",
+          paymentId: "",
+          signature: "",
+          status: "awaiting_payment",
+          paidAt: null,
+        }
+      : {
+          provider: "manual",
+          orderId: "",
+          paymentId: "",
+          signature: "",
+          status: "manual_reserved",
+          paidAt: new Date(),
+        },
     notes,
+    ...(COUNTER_PAYMENT_METHODS.includes(toCleanString(body?.collection).toLowerCase())
+      ? {
+          counterPayment: {
+            method: toCleanString(body.collection).toLowerCase(),
+            updatedAt: new Date(),
+            updatedBy: `${bookedBy.bookingSource}:${String(bookedBy.userId || "")}`,
+          },
+        }
+      : {}),
   });
 
+  await clearExpiredHoldsForSeats({ busServiceId: busService._id, scheduleId, travelDate, seatIds });
   try {
     await BusSeatHold.insertMany(
       seatIds.map((seatId) => ({
         busServiceId: busService._id,
         bookingId: booking._id,
-        userId: busDriver._id,
+        userId: bookedBy.userId || null,
         scheduleId,
         travelDate,
         seatId,
         holdToken: booking.bookingCode,
-        status: "booked",
-        expiresAt: null,
+        status: hold ? "held" : "booked",
+        expiresAt: hold ? booking.expiresAt : null,
       })),
       { ordered: true },
     );
   } catch (error) {
+    await BusSeatHold.deleteMany({ bookingId: booking._id });
     await BusBooking.deleteOne({ _id: booking._id });
     if (error?.code === 11000) {
       throw new ApiError(409, "One or more selected seats were just booked");
@@ -5958,10 +5995,16 @@ export const createBusDriverReservation = async (req, res) => {
     throw error;
   }
 
-  res.status(201).json({
-    success: true,
-    data: serializeBusDriverBooking(booking),
+  publishBusSeatChange({
+    busServiceId: busService._id,
+    scheduleId,
+    travelDate,
+    change: hold ? "held" : "booked",
+    seatIds,
+    bookingId: booking._id,
   });
+
+  return booking;
 };
 
 export const updateBusDriverSchedules = async (req, res) => {
@@ -6082,6 +6125,7 @@ export const startBusDriverLiveTrip = async (req, res) => {
   };
 
   await busService.save();
+  publishBusLiveLocation(busService);
 
   res.json({
     success: true,
@@ -6127,6 +6171,7 @@ export const updateBusDriverLiveLocation = async (req, res) => {
   };
 
   await busService.save();
+  publishBusLiveLocation(busService);
 
   res.json({
     success: true,
@@ -6160,6 +6205,7 @@ export const updateBusDriverLiveTripStatus = async (req, res) => {
     };
 
     await busService.save();
+    publishBusLiveLocation(busService);
 
     res.json({
       success: true,
@@ -6191,6 +6237,7 @@ export const updateBusDriverLiveTripStatus = async (req, res) => {
   }
 
   await busService.save();
+  publishBusLiveLocation(busService);
 
   res.json({
     success: true,
@@ -6293,6 +6340,96 @@ export const topUpMyWallet = async (req, res) => {
   });
 };
 
+// Basic UPI VPA validation: handle@bank. Lenient on the handle, strict enough
+// to reject obvious garbage (spaces, missing @, missing bank suffix).
+const UPI_ID_REGEX = /^[a-zA-Z0-9.\-_]{2,256}@[a-zA-Z]{2,64}$/;
+
+const sanitizeDriverPaymentUpi = (value) => String(value ?? "").trim();
+
+// GET /api/drivers/me/payment-upi — current driver's saved UPI + QR + status.
+export const getDriverPaymentUpi = async (req, res) => {
+  const driver = await Driver.findById(req.auth.sub).select("bankDetails");
+
+  if (!driver) {
+    throw new ApiError(404, "Driver not found");
+  }
+
+  const bank = driver.bankDetails || {};
+
+  res.json({
+    success: true,
+    data: {
+      upiId: bank.upiId || "",
+      qrCodeImage: bank.qrCodeImage || "",
+      verificationStatus: bank.upiVerificationStatus || "pending",
+      verifiedName: bank.upiVerifiedName || "",
+    },
+  });
+};
+
+// PUT /api/drivers/me/payment-upi — driver saves their OWN static UPI handle and
+// (optionally) a QR image. Any change resets verification to 'pending' so admin
+// re-checks it before it is exposed to riders. The uploaded QR image is a
+// convenience/fallback; riders generate a scannable QR from upiId directly.
+export const saveDriverPaymentUpi = async (req, res) => {
+  const upiId = sanitizeDriverPaymentUpi(req.body.upiId);
+  const qrImage = String(req.body.qrImage ?? req.body.qrCodeImage ?? "").trim();
+
+  if (!upiId) {
+    throw new ApiError(400, "upiId is required");
+  }
+
+  if (!UPI_ID_REGEX.test(upiId)) {
+    throw new ApiError(400, "Enter a valid UPI ID (e.g. name@bank)");
+  }
+
+  const driver = await Driver.findById(req.auth.sub);
+
+  if (!driver) {
+    throw new ApiError(404, "Driver not found");
+  }
+
+  const previous = driver.bankDetails || {};
+  const nextBank = { ...(previous.toObject ? previous.toObject() : previous) };
+
+  const upiChanged = sanitizeDriverPaymentUpi(previous.upiId) !== upiId;
+  nextBank.upiId = upiId;
+
+  // Only upload when a fresh data URL is supplied; an http(s) URL means the
+  // client sent back the already-stored image, so keep it as-is.
+  let qrChanged = false;
+  if (qrImage.startsWith("data:")) {
+    const uploaded = await uploadDataUrl({
+      dataUrl: qrImage,
+      folder: "driver-upi-qr",
+      publicIdPrefix: `driver-upi-${driver._id}`,
+    });
+    nextBank.qrCodeImage = uploaded.secureUrl;
+    qrChanged = true;
+  }
+
+  // A changed handle or QR must be re-verified by admin before riders see it.
+  if (upiChanged || qrChanged) {
+    nextBank.upiVerificationStatus = "pending";
+    nextBank.upiVerifiedName = "";
+    nextBank.upiVerifiedAt = null;
+  }
+
+  nextBank.updatedAt = new Date();
+  driver.bankDetails = nextBank;
+  driver.markModified("bankDetails");
+  await driver.save();
+
+  res.json({
+    success: true,
+    data: {
+      upiId: nextBank.upiId || "",
+      qrCodeImage: nextBank.qrCodeImage || "",
+      verificationStatus: nextBank.upiVerificationStatus || "pending",
+    },
+  });
+};
+
 export const createDriverPaymentQr = async (req, res) => {
   const amountInPaise = normalizePaymentAmount(req.body.amount);
   const rideId = String(req.body.rideId || "").trim();
@@ -6311,73 +6448,51 @@ export const createDriverPaymentQr = async (req, res) => {
     throw new ApiError(404, "Ride not found for this driver");
   }
 
-  let payload;
-
-  try {
-    const appName = await getConfiguredAppName();
-    const qr = await razorpayRequest({
-      method: "POST",
-      path: "/payments/qr_codes",
-      body: {
-        type: "upi_qr",
-        name: `${appName} Taxi Fare`,
-        usage: "single_use",
-        fixed_amount: true,
-        payment_amount: amountInPaise,
-        description: `Taxi fare for ride ${rideId}`,
-        close_by: Math.floor(Date.now() / 1000) + 30 * 60,
-        notes: {
-          rideId,
-          driverId: String(req.auth.sub),
-          serviceType: ride.serviceType || "ride",
-          source: "driver_collect_amount",
-        },
-      },
-    });
-
-    payload = {
-      id: qr.id,
-      entity: qr.entity,
-      status: qr.status,
-      imageUrl: qr.image_url,
-      linkUrl: qr.image_url,
-      amount: amountInPaise / 100,
-      currency: "INR",
-      description: qr.description,
-      closeBy: qr.close_by || null,
-      rawStatus: qr.status,
-      providerMode: "razorpay_qr",
-    };
-  } catch (error) {
-    if (!shouldFallbackToPaymentLinkQr(error)) {
-      throw error;
-    }
-
-    payload = await createPaymentLinkQr({
-      amountInPaise,
-      rideId,
-      driverId: req.auth.sub,
-      serviceType: ride.serviceType,
-    });
+  // "Online" at ride end is paid to the driver's OWN verified UPI - their
+  // uploaded scanner, or a QR made from their UPI ID - never a ZI CAB
+  // collection QR (riders were being shown the company's scanner). The ride
+  // is then closed as collected via UPI, which settles like cash.
+  const driver = await Driver.findById(req.auth.sub)
+    .select("name bankDetails.upiId bankDetails.qrCodeImage bankDetails.upiVerificationStatus bankDetails.upiVerifiedName")
+    .lean();
+  const bank = driver?.bankDetails || {};
+  const upiId = String(bank.upiId || "").trim();
+  if (!upiId || String(bank.upiVerificationStatus || "").toLowerCase() !== "verified") {
+    throw new ApiError(
+      400,
+      "Your UPI ID is not set up or not verified yet. Collect cash for this ride, and add your UPI in Profile > Payment.",
+    );
   }
-
+  const payeeName = String(bank.upiVerifiedName || driver?.name || "").trim();
+  // No amount in the QR: PhonePe and Google Pay decline amount-filled QRs to
+  // a personal UPI ID.
+  const upiUri = `upi://pay?pa=${encodeURIComponent(upiId)}${payeeName ? `&pn=${encodeURIComponent(payeeName)}` : ""}&cu=INR`;
+  const amount = amountInPaise / 100;
+  const driverQr = {
+    id: `driver-upi-${rideId}`,
+    status: "created",
+    imageUrl: String(bank.qrCodeImage || "").trim() || (await QRCode.toDataURL(upiUri, { margin: 1, width: 480 })),
+    linkUrl: "",
+    upiId,
+    payeeName,
+    amount,
+    currency: "INR",
+    description: `Pay ${payeeName || "your driver"} directly`,
+    providerMode: "driver_upi",
+  };
   ride.driverPaymentCollection = {
-    provider: "razorpay",
-    providerId: payload.id,
-    providerMode: payload.providerMode,
-    status: normalizeCollectionStatus(payload.rawStatus || payload.status),
-    amount: payload.amount,
-    currency: payload.currency || "INR",
-    linkUrl: payload.linkUrl || "",
+    provider: "driver_upi",
+    providerId: driverQr.id,
+    providerMode: "driver_upi",
+    status: "pending",
+    amount,
+    currency: "INR",
+    linkUrl: "",
     paidAt: null,
     updatedAt: new Date(),
   };
   await ride.save();
-
-  res.json({
-    success: true,
-    data: payload,
-  });
+  res.json({ success: true, data: driverQr });
 };
 
 const resolveRazorpayCredentials = async () => {
@@ -7359,6 +7474,7 @@ const getGenericVehicleType = (vehicle = {}) => {
 export const updateDriverVehicle = async (req, res) => {
   const {
     vehicleTypeId,
+    vehicleTypeIds,
     vehicleNumber,
     vehicleColor,
     vehicleMake,
@@ -7366,19 +7482,39 @@ export const updateDriverVehicle = async (req, res) => {
     vehicleImage,
   } = req.body;
 
-  let selectedVehicle = null;
+  // A driver can be enrolled in more than one vehicle category post-signup
+  // too (e.g. adding ZI Cab Non-AC to an existing ZI Cab AC enrollment) —
+  // mirrors the onboarding vehicle step, which already accepts this shape.
+  // The legacy singular `vehicleTypeId` is folded in too, de-duplicated, so
+  // older app builds that only ever send that keep working.
+  const requestedVehicleTypeIds = [
+    ...new Set(
+      [...(Array.isArray(vehicleTypeIds) ? vehicleTypeIds : []), vehicleTypeId]
+        .map((value) => String(value || "").trim())
+        .filter(Boolean),
+    ),
+  ];
 
-  if (vehicleTypeId) {
-    selectedVehicle = await Vehicle.findById(vehicleTypeId);
+  let orderedSelectedVehicles = [];
 
-    if (
-      !selectedVehicle ||
-      selectedVehicle.active === false ||
-      Number(selectedVehicle.status) === 0
-    ) {
+  if (requestedVehicleTypeIds.length) {
+    const foundVehicles = await Vehicle.find({ _id: { $in: requestedVehicleTypeIds } });
+    // Preserve the order the driver picked them in — the first one stays the
+    // "primary" vehicleType/vehicleTypeId, same convention as onboarding.
+    orderedSelectedVehicles = requestedVehicleTypeIds
+      .map((id) => foundVehicles.find((vehicle) => String(vehicle._id) === String(id)))
+      .filter(Boolean);
+
+    const hasInactiveVehicle = orderedSelectedVehicles.some(
+      (vehicle) => vehicle.active === false || Number(vehicle.status) === 0,
+    );
+
+    if (orderedSelectedVehicles.length !== requestedVehicleTypeIds.length || hasInactiveVehicle) {
       throw new ApiError(404, "Active vehicle type not found");
     }
   }
+
+  const selectedVehicle = orderedSelectedVehicles[0] || null;
 
   const driver = await Driver.findById(req.auth.sub);
 
@@ -7392,15 +7528,23 @@ export const updateDriverVehicle = async (req, res) => {
   if (selectedVehicle) {
     const nextVehicleType = getGenericVehicleType(selectedVehicle);
     const nextVehicleIconType = selectedVehicle.icon_types || nextVehicleType;
+    const nextVehicleTypeIds = orderedSelectedVehicles.map((vehicle) => vehicle._id);
 
     update.vehicleTypeId = selectedVehicle._id;
+    update.vehicleTypeIds = nextVehicleTypeIds;
     update.vehicleType = nextVehicleType;
     update.vehicleIconType = nextVehicleIconType;
+
+    const existingVehicleTypeIds = (driver.vehicleTypeIds || []).map((id) => String(id));
+    const sameVehicleTypeIds =
+      existingVehicleTypeIds.length === nextVehicleTypeIds.length &&
+      existingVehicleTypeIds.every((id, index) => id === String(nextVehicleTypeIds[index]));
 
     if (
       String(driver.vehicleTypeId || "") !== String(selectedVehicle._id || "") ||
       String(driver.vehicleType || "") !== String(nextVehicleType) ||
-      String(driver.vehicleIconType || "") !== String(nextVehicleIconType)
+      String(driver.vehicleIconType || "") !== String(nextVehicleIconType) ||
+      !sameVehicleTypeIds
     ) {
       vehicleChanged = true;
     }
@@ -7467,6 +7611,7 @@ export const updateDriverVehicle = async (req, res) => {
       phone: updatedDriver.phone,
       vehicleType: updatedDriver.vehicleType,
       vehicleTypeId: updatedDriver.vehicleTypeId,
+      vehicleTypeIds: updatedDriver.vehicleTypeIds,
       vehicleIconType: updatedDriver.vehicleIconType,
       vehicleIconUrl,
       vehicleMake: updatedDriver.vehicleMake,
@@ -8932,13 +9077,65 @@ export const getOwnerFleetDashboard = async (req, res) => {
   });
 };
 
-export const listOwnerBusServices = async (req, res) => {
-  const owner = await Owner.findById(req.auth.sub).lean();
+/// Which buses the logged-in account answers for: an owner's own buses, or the
+/// one bus a bus account runs. Everything on the bus dashboard goes through this.
+const resolveBusAccountScope = async (req) => {
+  if (req.auth?.role === "bus_driver") {
+    const busDriver = await BusDriver.findById(req.auth.sub).lean();
+    if (!busDriver) {
+      throw new ApiError(404, "Bus account not found");
+    }
+    if (busDriver.approve === false || String(busDriver.status || "").toLowerCase() === "pending") {
+      throw new ApiError(403, "Your bus account is pending approval");
+    }
+    return {
+      isBusAccount: true,
+      // No bus assigned matches nothing, rather than every bus.
+      filter: { _id: busDriver.assignedBusServiceId || new mongoose.Types.ObjectId() },
+      bookedBy: {
+        userId: busDriver._id,
+        reservedByDriverId: busDriver._id,
+        bookingSource: "bus_driver",
+        codePrefix: "BDR",
+      },
+    };
+  }
 
+  const owner = await Owner.findById(req.auth.sub).lean();
   if (!owner) {
     throw new ApiError(404, "Owner not found");
   }
+  return {
+    isBusAccount: false,
+    owner,
+    filter: { ownerId: owner._id },
+    bookedBy: { bookingSource: "owner", codePrefix: "OWN" },
+  };
+};
 
+export const listOwnerBusServices = async (req, res) => {
+  const scope = await resolveBusAccountScope(req);
+
+  if (scope.isBusAccount) {
+    const buses = await BusService.find(scope.filter)
+      .select("busName operatorName serviceNumber status schedules fareCurrency")
+      .lean();
+    res.json({
+      success: true,
+      data: buses.map((bus) => ({
+        id: String(bus._id),
+        busName: bus.busName || "",
+        operatorName: bus.operatorName || "",
+        serviceNumber: bus.serviceNumber || "",
+        status: bus.status || "draft",
+        schedules: Array.isArray(bus.schedules) ? bus.schedules : [],
+        fareCurrency: bus.fareCurrency || "INR",
+      })),
+    });
+    return;
+  }
+
+  const { owner } = scope;
   res.json({
     success: true,
     data: await listBusServices({ ownerId: owner._id }),
@@ -9014,12 +9211,361 @@ export const deleteOwnerBusService = async (req, res) => {
   });
 };
 
-export const getOwnerBusBookings = async (req, res) => {
-  const owner = await Owner.findById(req.auth.sub).lean();
-
-  if (!owner) {
-    throw new ApiError(404, "Owner not found");
+/// One of this account's own buses, or a 404: never anyone else's.
+const findOwnerBus = async (req) => {
+  const scope = await resolveBusAccountScope(req);
+  const busServiceId = toCleanString(req.params?.id);
+  const busService = mongoose.Types.ObjectId.isValid(busServiceId)
+    ? await BusService.findOne({ $and: [{ _id: busServiceId }, scope.filter] }).lean()
+    : null;
+  if (!busService) {
+    throw new ApiError(404, "Bus service not found");
   }
+
+  return { scope, busService };
+};
+
+export const getOwnerBusSeatLayout = async (req, res) => {
+  const { busService } = await findOwnerBus(req);
+  const scheduleId = toCleanString(req.query?.scheduleId);
+  const travelDate = normalizeBusTravelDate(req.query?.date || req.query?.travelDate || new Date());
+  const schedule = findBusSchedule(busService, scheduleId);
+
+  if (!isScheduleAvailableOnDate(schedule, travelDate)) {
+    throw new ApiError(404, "This bus does not run on the selected date");
+  }
+
+  const layout = await buildBusDriverSeatLayout({ busService, scheduleId, travelDate });
+  const route = resolveScheduleRoute(busService, schedule);
+
+  res.json({
+    success: true,
+    data: {
+      ...layout,
+      // Base fare per seat type, so the page can show what the server will charge.
+      seatFares: Object.fromEntries(
+        flattenBusBlueprintSeats(layout.blueprint).map((seat) => [
+          String(seat.id || ""),
+          priceBusSeats(busService, [seat]).baseAmount,
+        ]),
+      ),
+      serviceTaxPercentage: Math.max(0, Number(busService.serviceTaxPercentage || 0)),
+      fareCurrency: busService.fareCurrency || "INR",
+      bus: {
+        operatorName: busService.operatorName || "",
+        busName: busService.busName || "",
+        routeName: route.routeName || "",
+        fromCity: route.originCity || "",
+        toCity: route.destinationCity || "",
+        departureTime: schedule?.departureTime || "",
+        arrivalTime: schedule?.arrivalTime || "",
+      },
+    },
+  });
+};
+
+export const createOwnerBusReservation = async (req, res) => {
+  const { scope, busService } = await findOwnerBus(req);
+  if (String(busService.status || "") !== "active") {
+    throw new ApiError(409, "This bus is not active, so its seats can't be booked");
+  }
+
+  const booking = await createManualBusReservation({
+    busService,
+    body: req.body,
+    rejectDepartedTrips: true,
+    bookedBy: scope.bookedBy,
+  });
+
+  res.status(201).json({
+    success: true,
+    data: { ...serializeOwnerBusBooking(booking.toObject()), pnr: booking.pnr || "" },
+  });
+};
+
+// ---- prepaid counter seats: hold, then pay from the wallet or online --------
+
+export const holdOwnerBusSeats = async (req, res) => {
+  const { scope, busService } = await findOwnerBus(req);
+  if (String(busService.status || "") !== "active") {
+    throw new ApiError(409, "This bus is not active, so its seats can't be booked");
+  }
+  const account = vendorAccountFromAuth(req.auth);
+  const booking = await createManualBusReservation({
+    busService,
+    body: req.body,
+    rejectDepartedTrips: true,
+    bookedBy: scope.bookedBy,
+    hold: true,
+  });
+  const wallet = await getVendorWallet(account, { limit: 1 });
+  res.status(201).json({
+    success: true,
+    data: {
+      booking: serializeOwnerBusBooking(booking.toObject()),
+      amount: Number(booking.amount || 0),
+      expiresAt: booking.expiresAt,
+      walletBalance: wallet.balance,
+    },
+  });
+};
+
+export const payOwnerBusBookingFromWallet = async (req, res) => {
+  const owned = await findOwnerBusBooking(req);
+  const account = vendorAccountFromAuth(req.auth);
+  const { balance, booking } = await payHeldBookingFromWallet(account, owned._id, {
+    actor: `${req.auth?.role || "vendor"}:${String(req.auth?.sub || "")}`,
+  });
+  res.json({
+    success: true,
+    data: { booking: { ...serializeOwnerBusBooking(booking), pnr: booking.pnr || "" }, walletBalance: balance },
+  });
+};
+
+export const createOwnerBusBookingPaymentOrder = async (req, res) => {
+  const owned = await findOwnerBusBooking(req);
+  if (owned.status !== "pending" || !owned.expiresAt || owned.expiresAt <= new Date()) {
+    throw new ApiError(409, "The 10 minutes are over and the seats were released. Pick them again.");
+  }
+  const { keyId } = await resolveRazorpayCredentials();
+  if (owned.payment?.provider === "razorpay" && owned.payment?.orderId) {
+    return res.json({
+      success: true,
+      data: { keyId, orderId: owned.payment.orderId, amount: Math.round(Number(owned.amount || 0) * 100), currency: owned.currency || "INR", expiresAt: owned.expiresAt },
+    });
+  }
+  const order = await razorpayRequest({
+    method: "POST",
+    path: "/orders",
+    body: {
+      amount: Math.round(Number(owned.amount || 0) * 100),
+      currency: owned.currency || "INR",
+      receipt: `vbus_${String(owned._id).slice(-10)}_${Date.now().toString(36)}`,
+      notes: { purpose: "bus_vendor_seats", bookingCode: owned.bookingCode || "", seats: (owned.seatLabels || []).join(",") },
+    },
+  });
+  // Only a hold nobody has started paying for (wallet or another order).
+  const updated = await BusBooking.findOneAndUpdate(
+    { _id: owned._id, status: "pending", "payment.orderId": "", "payment.claimedAt": null },
+    { $set: { "payment.provider": "razorpay", "payment.orderId": order.id, "payment.status": "created" } },
+    { returnDocument: "after" },
+  );
+  if (!updated) {
+    throw new ApiError(409, "These seats are already being paid for. Refresh and try again.");
+  }
+  res.json({
+    success: true,
+    data: { keyId, orderId: order.id, amount: order.amount, currency: order.currency || "INR", expiresAt: updated.expiresAt },
+  });
+};
+
+export const verifyOwnerBusBookingPayment = async (req, res) => {
+  const owned = await findOwnerBusBooking(req);
+  const orderId = toCleanString(req.body?.razorpay_order_id);
+  const paymentId = toCleanString(req.body?.razorpay_payment_id);
+  const signature = toCleanString(req.body?.razorpay_signature);
+  if (!orderId || !paymentId || !signature || orderId !== owned.payment?.orderId) {
+    throw new ApiError(400, "Payment verification fields are required");
+  }
+  const { keySecret } = await resolveRazorpayCredentials();
+  const expected = crypto.createHmac("sha256", keySecret).update(`${orderId}|${paymentId}`).digest("hex");
+  if (expected !== signature) {
+    throw new ApiError(400, "Invalid payment signature");
+  }
+  const result = await finalizeBusBookingPayment({ bookingId: owned._id, paymentId, signature });
+  if (result.outcome === "confirmed" || result.outcome === "already_confirmed") {
+    const booking = result.booking.toObject ? result.booking.toObject() : result.booking;
+    return res.json({ success: true, data: { booking: { ...serializeOwnerBusBooking(booking), pnr: booking.pnr || "" } } });
+  }
+  if (result.outcome === "refunded") {
+    throw new ApiError(409, `${result.message || "The seats could not be booked."} The payment will be refunded.`);
+  }
+  throw new ApiError(409, "The payment is still being confirmed. Check the bookings in a minute.");
+};
+
+export const releaseOwnerBusBookingHold = async (req, res) => {
+  const owned = await findOwnerBusBooking(req);
+  if (owned.status !== "pending") {
+    return res.json({ success: true, data: { released: false } });
+  }
+  res.json({ success: true, data: { released: await releaseHeldBooking(owned._id) } });
+};
+
+export const getOwnerBusWallet = async (req, res) => {
+  await resolveBusAccountScope(req);
+  res.json({ success: true, data: await getVendorWallet(vendorAccountFromAuth(req.auth), { limit: req.query?.limit }) });
+};
+
+export const createOwnerBusWalletTopUp = async (req, res) => {
+  await resolveBusAccountScope(req);
+  res.json({ success: true, data: await createVendorTopUpOrder(vendorAccountFromAuth(req.auth), req.body?.amount) });
+};
+
+export const verifyOwnerBusWalletTopUp = async (req, res) => {
+  await resolveBusAccountScope(req);
+  res.json({ success: true, data: await verifyVendorTopUp(vendorAccountFromAuth(req.auth), req.body) });
+};
+
+// ---- marks and blocks for the bus vendor panel -----------------------------
+
+// A seat lock with no booking behind it: the vendor took the seat off sale for
+// one trip. Riders, partner channels and the counter all see it as taken.
+const VENDOR_BLOCK_SOURCE = "vendor-block";
+const COUNTER_PAYMENT_METHODS = ["cash", "upi", "unpaid"];
+const BOARDING_STATES = ["waiting", "boarded", "no_show"];
+
+const vendorActor = (req) => `${req.auth?.role || "vendor"}:${String(req.auth?.sub || "")}`;
+
+/// One of this account's bookings, or a 404.
+const findOwnerBusBooking = async (req) => {
+  const scope = await resolveBusAccountScope(req);
+  const bookingId = toCleanString(req.params?.id);
+  if (!mongoose.Types.ObjectId.isValid(bookingId)) {
+    throw new ApiError(404, "Booking not found");
+  }
+  const busIds = (await BusService.find(scope.filter).select("_id").lean()).map((item) => item._id);
+  const booking = await BusBooking.findOne({ _id: bookingId, busServiceId: { $in: busIds } });
+  if (!booking) {
+    throw new ApiError(404, "Booking not found");
+  }
+  return booking;
+};
+
+const readTripSeats = (req, busService) => {
+  const scheduleId = toCleanString(req.body?.scheduleId);
+  const travelDate = normalizeBusTravelDate(req.body?.travelDate || req.body?.date);
+  const seatIds = Array.isArray(req.body?.seatIds)
+    ? [...new Set(req.body.seatIds.map((item) => toCleanString(item)).filter(Boolean))]
+    : [];
+  if (!scheduleId || seatIds.length === 0) {
+    throw new ApiError(400, "scheduleId and seatIds are required");
+  }
+  if (!isScheduleAvailableOnDate(findBusSchedule(busService, scheduleId), travelDate)) {
+    throw new ApiError(404, "This bus does not run on the selected date");
+  }
+  const busSeatIds = new Set(flattenBusBlueprintSeats(busService.blueprint).map((seat) => String(seat.id || "")));
+  const unknown = seatIds.find((seatId) => !busSeatIds.has(seatId));
+  if (unknown) {
+    throw new ApiError(400, `Seat ${unknown} is not on this bus`);
+  }
+  return { scheduleId, travelDate, seatIds };
+};
+
+export const blockOwnerBusSeats = async (req, res) => {
+  const { busService } = await findOwnerBus(req);
+  const { scheduleId, travelDate, seatIds } = readTripSeats(req, busService);
+  const holdToken = `block:${String(req.auth?.sub || "")}`;
+
+  await clearExpiredHoldsForSeats({ busServiceId: busService._id, scheduleId, travelDate, seatIds });
+  const startedAt = new Date();
+  try {
+    await BusSeatHold.insertMany(
+      seatIds.map((seatId) => ({
+        busServiceId: busService._id,
+        bookingId: null,
+        userId: null,
+        source: VENDOR_BLOCK_SOURCE,
+        scheduleId,
+        travelDate,
+        seatId,
+        holdToken,
+        status: "booked",
+        expiresAt: null,
+      })),
+      { ordered: true },
+    );
+  } catch (error) {
+    // All or nothing: drop the blocks this request made before the clash.
+    await BusSeatHold.deleteMany({
+      busServiceId: busService._id,
+      scheduleId,
+      travelDate,
+      seatId: { $in: seatIds },
+      source: VENDOR_BLOCK_SOURCE,
+      bookingId: null,
+      holdToken,
+      createdAt: { $gte: startedAt },
+    });
+    if (error?.code === 11000) {
+      throw new ApiError(409, "One or more of these seats are already booked or blocked");
+    }
+    throw error;
+  }
+
+  publishBusSeatChange({ busServiceId: busService._id, scheduleId, travelDate, change: "booked", seatIds });
+  res.json({ success: true, data: await buildBusDriverSeatLayout({ busService, scheduleId, travelDate }) });
+};
+
+export const releaseOwnerBusSeatBlocks = async (req, res) => {
+  const { busService } = await findOwnerBus(req);
+  const { scheduleId, travelDate, seatIds } = readTripSeats(req, busService);
+
+  // Only blocks: a seat someone has booked is never freed from here.
+  const result = await BusSeatHold.deleteMany({
+    busServiceId: busService._id,
+    scheduleId,
+    travelDate,
+    seatId: { $in: seatIds },
+    source: VENDOR_BLOCK_SOURCE,
+    bookingId: null,
+  });
+  if (result.deletedCount) {
+    publishBusSeatChange({ busServiceId: busService._id, scheduleId, travelDate, change: "released", seatIds });
+  }
+  res.json({ success: true, data: await buildBusDriverSeatLayout({ busService, scheduleId, travelDate }) });
+};
+
+export const setOwnerBusBoarding = async (req, res) => {
+  const booking = await findOwnerBusBooking(req);
+  const state = toCleanString(req.body?.state).toLowerCase();
+  if (!BOARDING_STATES.includes(state)) {
+    throw new ApiError(400, "state must be waiting, boarded or no_show");
+  }
+  if (booking.status !== "confirmed") {
+    throw new ApiError(409, "Only confirmed bookings can be marked");
+  }
+
+  booking.set("boarding.boardedAt", state === "boarded" ? new Date() : null);
+  booking.set("boarding.boardedBy", state === "boarded" ? vendorActor(req) : "");
+  booking.set("boarding.noShowAt", state === "no_show" ? new Date() : null);
+  await booking.save();
+  res.json({ success: true, data: serializeOwnerBusBooking(booking.toObject()) });
+};
+
+export const setOwnerBusCollection = async (req, res) => {
+  const booking = await findOwnerBusBooking(req);
+  const method = toCleanString(req.body?.method).toLowerCase();
+  if (!COUNTER_PAYMENT_METHODS.includes(method)) {
+    throw new ApiError(400, "method must be cash, upi or unpaid");
+  }
+
+  booking.set("counterPayment", { method, updatedAt: new Date(), updatedBy: vendorActor(req) });
+  await booking.save();
+  res.json({ success: true, data: serializeOwnerBusBooking(booking.toObject()) });
+};
+
+/// What a printed ticket needs, with the same QR the conductor's scanner reads.
+export const getOwnerBusBookingTicket = async (req, res) => {
+  const booking = (await findOwnerBusBooking(req)).toObject();
+  const serialized = serializeOwnerBusBooking(booking);
+  const pnr = booking.pnr || booking.bookingCode || "";
+  const seatLabels = (serialized.activeSeats || []).map((seat) => seat.seatLabel);
+  const qrText = ["ZIBUS", pnr, booking.travelDate, booking.scheduleId, seatLabels.join(".")].join("|");
+
+  res.json({
+    success: true,
+    data: {
+      ...serialized,
+      pnr,
+      boardingPoint: booking.boardingPoint || {},
+      droppingPoint: booking.droppingPoint || {},
+      qrDataUrl: await QRCode.toDataURL(qrText, { margin: 1, width: 240, errorCorrectionLevel: "M" }),
+    },
+  });
+};
+
+export const getOwnerBusBookings = async (req, res) => {
+  const scope = await resolveBusAccountScope(req);
 
   const busServiceId = toCleanString(req.query?.busServiceId);
   const travelDate = toCleanString(req.query?.travelDate || req.query?.date);
@@ -9027,7 +9573,7 @@ export const getOwnerBusBookings = async (req, res) => {
   const status = toCleanString(req.query?.status).toLowerCase();
   const search = toCleanString(req.query?.search).toLowerCase();
 
-  const ownerBuses = await BusService.find({ ownerId: owner._id })
+  const ownerBuses = await BusService.find(scope.filter)
     .sort({ operatorName: 1, busName: 1 })
     .select("_id busName operatorName serviceNumber coachType busCategory status route schedules blueprint seatPrice variantPricing fareCurrency ownerDriverId driverName driverPhone")
     .lean();
@@ -9048,6 +9594,9 @@ export const getOwnerBusBookings = async (req, res) => {
   }
   if (status && status !== "all") {
     query.status = status;
+  } else {
+    // Seats a vendor held but never paid for are not bookings.
+    query.$nor = [{ status: { $in: ["pending", "expired", "failed"] }, bookingSource: { $in: ["owner", "bus_driver"] } }];
   }
 
   const rawBookings = await BusBooking.find(query)
@@ -9269,11 +9818,20 @@ export const getOwnerBusBookingCalendar = async (req, res) => {
 };
 
 export const cancelOwnerBusBookingSeats = async (req, res) => {
-  const owner = await Owner.findById(req.auth.sub).lean();
-
-  if (!owner) {
-    throw new ApiError(404, "Owner not found");
+  const claimId = String(req.params?.bookingId || req.params?.id || "").trim();
+  if (!mongoose.Types.ObjectId.isValid(claimId)) {
+    return cancelOwnerBusBookingSeatsClaimed(req, res);
   }
+  try {
+    return await withBusCancellationClaim({ _id: claimId }, () => cancelOwnerBusBookingSeatsClaimed(req, res));
+  } catch (error) {
+    if (error?.statusCode === 409 && !(error instanceof ApiError)) throw new ApiError(409, error.message);
+    throw error;
+  }
+};
+
+const cancelOwnerBusBookingSeatsClaimed = async (req, res) => {
+  const scope = await resolveBusAccountScope(req);
 
   const bookingId = toCleanString(req.params?.id);
   const selectedSeatIds = Array.isArray(req.body?.seatIds)
@@ -9291,8 +9849,7 @@ export const cancelOwnerBusBookingSeats = async (req, res) => {
   }
 
   const busService = await BusService.findOne({
-    _id: booking.busServiceId,
-    ownerId: owner._id,
+    $and: [{ _id: booking.busServiceId }, scope.filter],
   });
   if (!busService) {
     throw new ApiError(403, "This bus booking does not belong to your bus service");
@@ -9329,7 +9886,6 @@ export const cancelOwnerBusBookingSeats = async (req, res) => {
     booking,
     busService,
     seatIds: seatsToCancel.map((item) => item.seatId),
-    travelDateOverride: req.body?.travelDate || req.body?.date,
   });
   if (!cancellationQuote.allowed) {
     throw new ApiError(409, cancellationQuote.reason || "This booking can no longer be cancelled");
@@ -9337,8 +9893,11 @@ export const cancelOwnerBusBookingSeats = async (req, res) => {
 
   const cancelledAt = new Date();
   let refundPayload = null;
-  if (cancellationQuote.refundAmount > 0) {
-    const paymentId = toCleanString(booking.payment?.paymentId);
+  const paymentId = toCleanString(booking.payment?.paymentId);
+  // Counter (cash) and channel bookings were not paid through Razorpay: the
+  // refund, if any, is settled directly, so there is nothing to call.
+  const paidOnline = String(booking.payment?.provider || "razorpay") === "razorpay";
+  if (cancellationQuote.refundAmount > 0 && paidOnline) {
     if (!paymentId) {
       throw new ApiError(409, "This booking cannot be refunded because the payment reference is missing");
     }
@@ -9379,7 +9938,9 @@ export const cancelOwnerBusBookingSeats = async (req, res) => {
       chargeAmount: index === seatsToCancel.length - 1
         ? Math.max(0, Math.round((cancellationQuote.chargeAmount - (perSeatChargeAmount * (seatsToCancel.length - 1))) * 100) / 100)
         : perSeatChargeAmount,
-      refundStatus: refundPayload ? (refundPayload.status || "processed") : "not_applicable",
+      refundStatus: refundPayload
+        ? (refundPayload.status || "processed")
+        : (!paidOnline && cancellationQuote.refundAmount > 0 ? "settle_offline" : "not_applicable"),
       refundId: refundPayload?.id || "",
       refundProcessedAt: refundPayload?.created_at ? new Date(Number(refundPayload.created_at) * 1000) : cancelledAt,
       notes: ownerNote || cancellationQuote.notes || "",
@@ -9406,13 +9967,47 @@ export const cancelOwnerBusBookingSeats = async (req, res) => {
   if (!booking.notes?.includes(ownerNote)) {
     booking.notes = [booking.notes, ownerNote].filter(Boolean).join(" | ");
   }
+  // Paid from the vendor's wallet: the whole price of each cancelled seat goes
+  // back to that wallet.
+  const walletPaid = String(booking.payment?.provider || "") === VENDOR_WALLET_PROVIDER;
+  let walletRefund = 0;
+  if (walletPaid) {
+    const seatPrice = new Map((booking.seatPrices || []).map((item) => [String(item.seatId), Number(item.amount || 0)]));
+    const fallback = originalSeatIds.length ? Number(booking.amount || 0) / originalSeatIds.length : 0;
+    for (const entry of booking.cancelledSeats.slice(-seatsToCancel.length)) {
+      const price = Math.round((seatPrice.get(String(entry.seatId)) ?? fallback) * 100) / 100;
+      entry.refundAmount = price;
+      entry.chargeAmount = 0;
+      entry.refundStatus = "wallet";
+      walletRefund += price;
+    }
+  }
   await booking.save();
+  if (walletPaid && walletRefund > 0) {
+    await refundSeatsToVendorWallet({
+      booking,
+      amount: walletRefund,
+      seatLabels: seatsToCancel.map((item) => item.seatLabel || item.seatId),
+      actor: `${req.auth?.role || "vendor"}:${String(req.auth?.sub || "")}`,
+    });
+  }
 
   await BusSeatHold.deleteMany({
     bookingId: booking._id,
     status: { $in: ["held", "booked"] },
     seatId: { $in: seatsToCancel.map((item) => item.seatId) },
   });
+  publishBusSeatChange({
+    busServiceId: booking.busServiceId,
+    scheduleId: booking.scheduleId,
+    travelDate: booking.travelDate,
+    change: "released",
+    seatIds: seatsToCancel.map((item) => item.seatId),
+    bookingId: booking._id,
+  });
+  if (remainingActiveSeatCount <= 0) {
+    await cancelAndRefundFoodForBooking(booking, { reason: "Cancelled by the bus operator", by: "owner" });
+  }
 
   const hydratedBooking = await BusBooking.findById(booking._id)
     .populate("userId", "name phone email")
@@ -9678,7 +10273,7 @@ export const uploadPoolingOnboardingImageRequest = async (req, res) => {
     throw new ApiError(400, "Image data is required");
   }
 
-  const result = await uploadDataUrlToCloudinary({
+  const result = await uploadDataUrl({
     dataUrl: image,
     publicIdPrefix: "pooling-driver-onboarding",
   });
@@ -9938,4 +10533,7 @@ export const claimDriverIncentiveReward = async (req, res) => {
       },
     },
   });
-};
+};// A zero or blank per-type price means "not set", so the bus fare applies.
+const positivePrice = (value) => (Number(value) > 0 ? Number(value) : undefined);
+
+

@@ -22,9 +22,15 @@ const MainLayout = ({ children }) => {
     '/terms-and-conditions',
     '/refund',
     '/cancellation',
+    '/data-deletion',
     '/blog',
     '/links',
     '/careers',
+    '/corporate',
+    '/partner',
+    '/drive-with-us',
+    '/advertise',
+    '/zi-bus',
   ];
   const isStaticPath = staticPages.includes(location.pathname);
   const isAdminPath =
@@ -39,6 +45,15 @@ const MainLayout = ({ children }) => {
     location.pathname === '/taxi/user/login' ||
     location.pathname === '/taxi/user/signup' ||
     location.pathname === '/taxi/user/verify-otp' ||
+    location.pathname === '/taxi/driver/login' ||
+    location.pathname === '/taxi/driver/otp-verify' ||
+    location.pathname === '/taxi/owner/login' ||
+    location.pathname === '/taxi/owner/otp-verify' ||
+    location.pathname === '/taxi/owner/bus-dashboard' ||
+    location.pathname === '/bus-login' ||
+    location.pathname === '/bus-dashboard' ||
+    location.pathname.startsWith('/bus-register') ||
+    location.pathname.startsWith('/taxi/driver/role-signup/bus-builder') ||
     location.pathname === '/login';
 
   if (isSplashPath || isAuthPath) {

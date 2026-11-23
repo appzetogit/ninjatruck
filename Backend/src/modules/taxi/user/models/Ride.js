@@ -14,9 +14,16 @@ const rideMessageSchema = new mongoose.Schema(
     },
     message: {
       type: String,
-      required: true,
+      default: '',
       trim: true,
       maxlength: 1000,
+    },
+    // Optional attachment (e.g. rider's current-location photo). A message may
+    // carry text, an image, or both.
+    imageUrl: {
+      type: String,
+      default: '',
+      trim: true,
     },
     sentAt: {
       type: Date,
@@ -81,6 +88,14 @@ const rideSchema = new mongoose.Schema(
       ref: 'Delivery',
       default: null,
     },
+    // Where the booking originated. Website enquiries are leads with no real
+    // coordinates, so dispatch must skip them — see dispatchService.
+    bookingSource: {
+      type: String,
+      enum: ['app', 'website', 'admin'],
+      default: 'app',
+      trim: true,
+    },
     serviceType: {
       type: String,
       enum: ['ride', 'parcel', 'intercity'],
@@ -110,6 +125,13 @@ const rideSchema = new mongoose.Schema(
         trim: true,
       },
       travelDate: {
+        type: String,
+        default: '',
+        trim: true,
+      },
+      // The rider's chosen return date/time for a round trip, stored as the
+      // client's ISO string. Blank for one-way bookings.
+      returnDate: {
         type: String,
         default: '',
         trim: true,
@@ -187,6 +209,31 @@ const rideSchema = new mongoose.Schema(
         default: '',
         trim: true,
       },
+      /// Photos of the parcel taken by the sender when booking. The app caps
+      /// this at two; they are upload URLs rather than inline data so that ride
+      /// documents stay small.
+      photos: {
+        type: [String],
+        default: [],
+      },
+      /// Handling notes from the sender ('fragile', 'call before arriving').
+      /// Separate from `description`, which names what is inside.
+      instructions: {
+        type: String,
+        default: '',
+        trim: true,
+      },
+      /// Proof the driver collected the parcel. Without it the trip cannot
+      /// start -- see `assertParcelProof` in rideService.
+      pickupProof: {
+        url: { type: String, default: '' },
+        at: { type: Date, default: null },
+      },
+      /// Proof the driver handed it over. Without it the trip cannot complete.
+      deliveryProof: {
+        url: { type: String, default: '' },
+        at: { type: Date, default: null },
+      },
     },
     scheduledAt: {
       type: Date,
@@ -238,6 +285,19 @@ const rideSchema = new mongoose.Schema(
     fare: {
       type: Number,
       required: true,
+      min: 0,
+    },
+    // Parcel waiting at pickup: minutes the driver waited beyond the free
+    // window, and what that added to the fare. Stored so a receipt can show the
+    // charge rather than an unexplained jump in the total.
+    waitingMinutes: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    waitingCharge: {
+      type: Number,
+      default: 0,
       min: 0,
     },
     baseFare: {
@@ -300,6 +360,18 @@ const rideSchema = new mongoose.Schema(
       ref: 'TaxiRideBid',
       default: null,
     },
+    /// The road route for this trip, resolved once when the ride is created.
+    ///
+    /// Stored rather than fetched per client so the rider and the driver draw
+    /// the same line, and so the map still works when a routing provider is
+    /// throttled.
+    route: {
+      polyline: { type: String, default: '' },
+      distanceMeters: { type: Number, default: 0 },
+      durationMinutes: { type: Number, default: 0 },
+      provider: { type: String, default: '' },
+      fetchedAt: { type: Date, default: null },
+    },
     estimatedDistanceMeters: {
       type: Number,
       default: 0,
@@ -313,6 +385,45 @@ const rideSchema = new mongoose.Schema(
     paymentMethod: {
       type: String,
       enum: ['cash', 'online'],
+      default: 'cash',
+      lowercase: true,
+      trim: true,
+    },
+    // Set when an admin cancels the ride from the Trips page.
+    cancelledBy: {
+      type: String,
+      default: '',
+      trim: true,
+    },
+    cancelReason: {
+      type: String,
+      default: '',
+      trim: true,
+    },
+    cancelledAt: {
+      type: Date,
+      default: null,
+    },
+    // Removed from the admin trip lists by an admin. The ride itself is kept,
+    // so earnings, wallet history and reports still add up.
+    adminDeletedAt: {
+      type: Date,
+      default: null,
+    },
+    adminDeletedBy: {
+      type: String,
+      default: '',
+      trim: true,
+    },
+    // How the driver actually collected the fare at ride end. Both 'cash' and
+    // 'upi' mean the money reached the driver directly (not the platform), so
+    // settlement treats them identically (cash-like). This field only records
+    // the tender type for reporting; it does not change commission handling.
+    // 'online' is a rider who paid the fare in the app (Razorpay): the money
+    // reached ZI CAB, which credits the driver's wallet.
+    collectedVia: {
+      type: String,
+      enum: ['cash', 'upi', 'online'],
       default: 'cash',
       lowercase: true,
       trim: true,
@@ -450,6 +561,68 @@ const rideSchema = new mongoose.Schema(
       default: 'taxi',
       trim: true,
     },
+    // City, airport or outstation, from the pickup and drop at booking. The
+    // airport fee is included in the fare when the app added it.
+    trip_category: {
+      category: {
+        type: String,
+        default: 'city',
+        trim: true,
+      },
+      airport_id: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'TaxiAirport',
+        default: null,
+      },
+      airport_name: {
+        type: String,
+        default: '',
+        trim: true,
+      },
+      airport_fee: {
+        type: Number,
+        default: 0,
+      },
+    },
+    // Surge the fare was quoted under; the fare already includes it.
+    // Tolls on an outstation trip, found from its route and the admin's toll
+    // plazas. Included in `fare`; they go in full to the driver (no commission).
+    tollCharges: {
+      total: { type: Number, default: 0 },
+      roundTrip: { type: Boolean, default: false },
+      items: {
+        type: [
+          new mongoose.Schema(
+            {
+              plazaId: { type: mongoose.Schema.Types.ObjectId, ref: 'TaxiTollPlaza', default: null },
+              name: { type: String, default: '', trim: true },
+              highway: { type: String, default: '', trim: true },
+              oneWay: { type: Number, default: 0 },
+              returnTrip: { type: Number, default: 0 },
+              amount: { type: Number, default: 0 },
+            },
+            { _id: false },
+          ),
+        ],
+        default: [],
+      },
+    },
+    surge: {
+      multiplier: {
+        type: Number,
+        default: 1,
+      },
+      source: {
+        type: String,
+        default: 'none',
+        trim: true,
+      },
+      hex: {
+        type: String,
+        default: '',
+        trim: true,
+      },
+    },
     pricingSnapshot: {
       setPriceId: {
         type: mongoose.Schema.Types.ObjectId,
@@ -491,6 +664,21 @@ const rideSchema = new mongoose.Schema(
         type: [String],
         default: ['cash', 'online'],
       },
+      // Where a parcel's delivery tariff came from: 'zone', 'service_location'
+      // or 'vehicle'. Its presence also tells the waiting charge that
+      // waiting_charge and free_waiting_before above were locked to that tariff
+      // at booking; parcels booked before it existed use the vehicle's pricing.
+      delivery_tariff_source: {
+        type: String,
+        default: null,
+      },
+      // The platform fee the rider was charged on top of the trip. Part of
+      // `fare`, but admin's money: settlement takes it with the commission.
+      rider_platform_fee: {
+        type: Number,
+        default: 0,
+        min: 0,
+      },
       resolvedAt: {
         type: Date,
         default: null,
@@ -509,6 +697,15 @@ const rideSchema = new mongoose.Schema(
     walletSettledAt: {
       type: Date,
       default: null,
+    },
+    // Ride cashback spent as a discount on this ride (see
+    // rewards/services/cashbackRedemptionService.js). `fare` is already net of
+    // it; ZI CAB pays it, so settlement adds it back for the driver.
+    cashbackRedemption: {
+      amount: { type: Number, default: 0, min: 0 },
+      fareBeforeCashback: { type: Number, default: 0, min: 0 },
+      appliedAt: { type: Date, default: null },
+      consumedAt: { type: Date, default: null },
     },
     promo: {
       code: {

@@ -1,10 +1,12 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import {
+    clearDriverAuthState,
     getAuthenticatedDriverRole,
     getCurrentDriver,
     getLocalDriverToken,
     getStoredDriverRole,
+    rememberOwnerReturnPath,
 } from '../services/registrationService';
 import DriverRideRequestListener from './DriverRideRequestListener';
 
@@ -85,9 +87,23 @@ const softEntryRoutes = new Set([
     '/taxi/owner/reg-phone',
 ]);
 
-const redirectToDriverLogin = (navigate) => {
+const redirectToDriverLogin = (navigate, pathname = '') => {
+    // An owner page asks for the owner login, whose form also registers new
+    // numbers as owners, and comes back here afterwards.
+    if (pathname.startsWith('/taxi/owner')) {
+        if (!softEntryRoutes.has(pathname)) {
+            rememberOwnerReturnPath(pathname);
+        }
+        navigate('/taxi/owner/login', { replace: true });
+        return;
+    }
     navigate('/taxi/driver/login', { replace: true });
 };
+
+/// Logged in as a driver or bus driver, the owner login must still open: that
+/// session is not an owner's, so it is no reason to leave the page.
+const isOwnerLoginWithOtherSession = (pathname, role) =>
+    (pathname === '/taxi/owner/login' || pathname === '/taxi/owner/reg-phone') && role !== 'owner';
 
 const getStoredRole = () => String(getStoredDriverRole() || 'driver').toLowerCase();
 const getAuthenticatedRole = () => String(getAuthenticatedDriverRole() || 'driver').toLowerCase();
@@ -137,6 +153,10 @@ const DriverLayout = () => {
     const [isAllowed, setIsAllowed] = useState(true);
     const verifiedTokenRef = useRef('');
     const verifiedApprovalRef = useRef(false);
+    // The token that has passed /drivers/me, and the one the login page could
+    // not check (server unreachable), so neither screen waits on it again.
+    const [clearedToken, setClearedToken] = useState('');
+    const [softCheckedToken, setSoftCheckedToken] = useState('');
 
     useEffect(() => {
         const currentPath = location.pathname;
@@ -146,6 +166,7 @@ const DriverLayout = () => {
         const authenticatedRole = getAuthenticatedRole();
         const shouldVerifyOnboardingRoute =
             Boolean(token)
+            && !isOwnerLoginWithOtherSession(currentPath, authenticatedRole)
             && (
                 softEntryRoutes.has(currentPath)
                 || (
@@ -165,6 +186,12 @@ const DriverLayout = () => {
             setIsAllowed(false);
             verifiedTokenRef.current = '';
             verifiedApprovalRef.current = false;
+            redirectToDriverLogin(navigate, currentPath, authenticatedRole);
+            return;
+        }
+
+        if (currentPath.startsWith('/taxi/owner') && authenticatedRole !== 'owner') {
+            setIsAllowed(false);
             redirectToDriverLogin(navigate, currentPath, authenticatedRole);
             return;
         }
@@ -213,6 +240,7 @@ const DriverLayout = () => {
                 if (!isApproved) {
                     if (isPendingAllowedRoute(currentPath)) {
                         setIsAllowed(true);
+                        setClearedToken(token);
                         verifiedTokenRef.current = '';
                         verifiedApprovalRef.current = false;
                         setIsChecking(false);
@@ -227,6 +255,7 @@ const DriverLayout = () => {
                 }
 
                 setIsAllowed(true);
+                setClearedToken(token);
                 verifiedTokenRef.current = token;
                 verifiedApprovalRef.current = true;
 
@@ -282,19 +311,25 @@ const DriverLayout = () => {
                     return;
                 }
 
-                setIsAllowed(false);
                 verifiedTokenRef.current = '';
                 verifiedApprovalRef.current = false;
 
-                if (error?.status === 401) {
+                // The account or token is gone: forget it, or every later visit
+                // would open the app on a token the server refuses.
+                if (error?.status === 401 || error?.status === 404) {
+                    clearDriverAuthState();
+                    setIsAllowed(false);
                     redirectToDriverLogin(navigate, currentPath, authenticatedRole);
                     return;
                 }
 
-                if (error?.status === 404) {
-                    redirectToDriverLogin(navigate, currentPath, authenticatedRole);
+                // Could not check it: the login page still has to work.
+                if (softEntryRoutes.has(currentPath)) {
+                    setSoftCheckedToken(token);
                     return;
                 }
+
+                setIsAllowed(false);
 
                 if (error?.status === 403) {
                     navigate(getPendingDriverRoute(currentPath), { replace: true });
@@ -316,9 +351,17 @@ const DriverLayout = () => {
         };
     }, [isAllowed, location.pathname, location.state, navigate]);
 
+    const currentToken = getLocalDriverToken();
+    const isWaitingForAuth = isOnboardingRoute(location.pathname)
+        ? softEntryRoutes.has(location.pathname)
+            && Boolean(currentToken)
+            && softCheckedToken !== currentToken
+            && !isOwnerLoginWithOtherSession(location.pathname, getAuthenticatedRole())
+        : isChecking || !isAllowed || !currentToken || clearedToken !== currentToken;
+
     return (
         <div className="driver-theme min-h-screen">
-            {isChecking && !isOnboardingRoute(location.pathname) ? (
+            {isWaitingForAuth ? (
                 <div className="min-h-screen flex items-center justify-center bg-white">
                     <div className="w-10 h-10 border-4 border-slate-200 border-t-slate-900 rounded-full animate-spin" />
                 </div>

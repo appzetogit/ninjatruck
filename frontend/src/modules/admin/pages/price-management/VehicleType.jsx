@@ -193,6 +193,9 @@ const buildVehicleFormData = (selectedVehicle = {}) => ({
   vehicle_preference: Array.isArray(selectedVehicle.vehicle_preference)
     ? selectedVehicle.vehicle_preference.map((item) => String(item?._id || item))
     : [],
+  app_modules: Array.isArray(selectedVehicle.app_modules)
+    ? selectedVehicle.app_modules.map((item) => String(item?._id || item))
+    : [],
 });
 
 const sanitizeObjectIdList = (items = []) =>
@@ -226,6 +229,8 @@ const defaultFormData = {
     base_price: '',
     free_distance: '',
     distance_price: '',
+    free_time: '',
+    time_price: '',
   },
   service_tax: '0',
   admin_commission_type_from_driver: '1',
@@ -236,6 +241,7 @@ const defaultFormData = {
   active: true,
   supported_other_vehicle_types: [],
   vehicle_preference: [],
+  app_modules: [],
 };
 
 const DELIVERY_CATEGORY_OPTIONS = [
@@ -285,6 +291,8 @@ const normalizeDeliveryDistancePricing = (value = {}) => ({
   base_price: String(value?.base_price ?? ''),
   free_distance: String(value?.free_distance ?? value?.base_distance ?? ''),
   distance_price: String(value?.distance_price ?? ''),
+  free_time: String(value?.free_time ?? ''),
+  time_price: String(value?.time_price ?? ''),
 });
 
 const clampNonNegativeInput = (value) => {
@@ -392,8 +400,12 @@ const VehicleType = ({ mode: propMode }) => {
   const [isSaving, setIsSaving] = useState(false);
   const [isTransportTypeMenuOpen, setIsTransportTypeMenuOpen] = useState(false);
   const [vehiclePreferences, setVehiclePreferences] = useState([]);
+  // The modules a rider can pick on the home screen. A vehicle assigned to
+  // none of them stays available everywhere.
+  const [appModules, setAppModules] = useState([]);
   const [pagination, setPagination] = useState({ total: 0, current_page: 1 });
   const [errorMessage, setErrorMessage] = useState('');
+  const [togglingId, setTogglingId] = useState('');
   const [formData, setFormData] = useState({ ...defaultFormData, transport_type: '' });
   const { transportTypes } = useTaxiTransportTypes({ enabled: isEditor });
   const transportTypeOptions = useMemo(() => {
@@ -430,6 +442,17 @@ const VehicleType = ({ mode: propMode }) => {
       try {
         const vehicleCatalogPromise = api.get(isEditor ? '/admin/types/vehicle-types' : '/admin/types/vehicle-types/list');
         const preferencePromise = isEditor ? api.get('/admin/vehicle_preference') : Promise.resolve(null);
+        // Public route: the module list is the same one the rider app reads, so
+        // the admin cannot assign a module the app will not offer. Fetched on
+        // the list too, which names the modules each vehicle is offered under.
+        api.get('/users/app-modules')
+          .then((response) => {
+            if (!mounted) return;
+            const payload = unwrap(response);
+            const rows = Array.isArray(payload?.results) ? payload.results : [];
+            setAppModules(rows.filter((row) => row && (row.active ?? 1)));
+          })
+          .catch(() => {});
         const detailPromise = isEditor && id ? api.get(`/admin/types/vehicle-types/${id}`) : Promise.resolve(null);
 
         if (!id && propMode === 'create') {
@@ -601,8 +624,10 @@ const VehicleType = ({ mode: propMode }) => {
               base_price: Number(formData.delivery_distance_pricing?.base_price || 0),
               free_distance: Number(formData.delivery_distance_pricing?.free_distance || 0),
               distance_price: Number(formData.delivery_distance_pricing?.distance_price || 0),
-              free_time: 0,
-              time_price: 0,
+              // These used to be hard-coded to 0, so saving a delivery vehicle
+              // for any reason silently switched off its waiting charge.
+              free_time: Number(formData.delivery_distance_pricing?.free_time || 0),
+              time_price: Number(formData.delivery_distance_pricing?.time_price || 0),
             }
           : {
               enabled: false,
@@ -621,6 +646,7 @@ const VehicleType = ({ mode: propMode }) => {
         active: formData.active,
         supported_other_vehicle_types: sanitizeObjectIdList(formData.supported_other_vehicle_types),
         vehicle_preference: sanitizeObjectIdList(formData.vehicle_preference),
+        app_modules: sanitizeObjectIdList(formData.app_modules),
       };
 
       if (id) {
@@ -635,6 +661,52 @@ const VehicleType = ({ mode: propMode }) => {
     } finally {
       setIsSaving(false);
     }
+  };
+
+  /// Switches a vehicle on or off for the rider app straight from the list.
+  ///
+  /// The row flips first and is put back if the server refuses, because the
+  /// alternative - a switch that does nothing until a round trip finishes -
+  /// reads as broken, which is what this one was: it had no handler at all.
+  const handleToggleActive = async (vehicle) => {
+    const vehicleId = String(vehicle.id || vehicle._id || '');
+    if (!vehicleId || togglingId) {
+      return;
+    }
+
+    const nextActive = vehicle.active === false;
+    setTogglingId(vehicleId);
+    setVehicles((prev) => prev.map((item) => (
+      String(item.id || item._id) === vehicleId
+        ? { ...item, active: nextActive, status: nextActive ? 1 : 0 }
+        : item
+    )));
+
+    try {
+      await api.patch(`/admin/types/vehicle-types/${vehicleId}`, { status: nextActive ? 1 : 0 });
+    } catch (error) {
+      setVehicles((prev) => prev.map((item) => (
+        String(item.id || item._id) === vehicleId
+          ? { ...item, active: !nextActive, status: !nextActive ? 1 : 0 }
+          : item
+      )));
+      setErrorMessage(error?.response?.data?.message || error.message || 'Could not change this vehicle.');
+    } finally {
+      setTogglingId('');
+    }
+  };
+
+  /// The modules a vehicle is offered under, by name. An empty list means every
+  /// module, which is the schema's own convention - see Vehicle.app_modules.
+  const moduleNamesFor = (vehicle) => {
+    const ids = Array.isArray(vehicle.app_modules) ? vehicle.app_modules.map(String) : [];
+    if (ids.length === 0) {
+      return [];
+    }
+
+    return ids
+      .map((moduleId) => appModules.find((row) => String(row._id || row.id) === moduleId)?.name)
+      .filter(Boolean);
   };
 
   const handleDelete = async (vehicleId) => {
@@ -724,18 +796,19 @@ const VehicleType = ({ mode: propMode }) => {
                   <th className="px-6 py-4 text-sm font-semibold text-slate-600">Vehicle</th>
                   <th className="px-6 py-4 text-sm font-semibold text-slate-600">Transport</th>
                   <th className="px-6 py-4 text-sm font-semibold text-slate-600">Dispatch</th>
-                  <th className="px-6 py-4 text-sm font-semibold text-slate-600">Active</th>
+                  <th className="px-6 py-4 text-sm font-semibold text-slate-600">Shown in</th>
+                  <th className="px-6 py-4 text-sm font-semibold text-slate-600">Shown in app</th>
                   <th className="px-6 py-4 text-right text-sm font-semibold text-slate-600">Action</th>
                 </tr>
               </thead>
               <tbody>
                 {loading ? (
                   <tr>
-                    <td colSpan="5" className="px-6 py-20 text-center text-sm text-slate-400">Loading vehicle types...</td>
+                    <td colSpan="6" className="px-6 py-20 text-center text-sm text-slate-400">Loading vehicle types...</td>
                   </tr>
                 ) : !vehicles.length ? (
                   <tr>
-                    <td colSpan="5" className="px-6 py-20 text-center text-sm text-slate-400">No vehicle types found.</td>
+                    <td colSpan="6" className="px-6 py-20 text-center text-sm text-slate-400">No vehicle types found.</td>
                   </tr>
                 ) : vehicles.map((vehicle) => (
                   <tr key={vehicle.id} className="border-t border-slate-100">
@@ -763,7 +836,23 @@ const VehicleType = ({ mode: propMode }) => {
                     </td>
                     <td className="px-6 py-5 text-sm font-medium text-slate-700">{vehicle.trip_dispatch_type || vehicle.dispatch_type || 'normal'}</td>
                     <td className="px-6 py-5">
-                      <StatusToggle active={vehicle.active !== false} onToggle={() => {}} />
+                      {moduleNamesFor(vehicle).length === 0 ? (
+                        <span className="text-xs font-medium text-slate-400">Every section</span>
+                      ) : (
+                        <div className="flex flex-wrap gap-1">
+                          {moduleNamesFor(vehicle).map((name) => (
+                            <span key={name} className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-600">
+                              {name}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </td>
+                    <td className="px-6 py-5">
+                      <StatusToggle
+                        active={vehicle.active !== false}
+                        onToggle={() => handleToggleActive(vehicle)}
+                      />
                     </td>
                     <td className="px-6 py-5">
                       <div className="flex items-center justify-end gap-2">
@@ -916,6 +1005,72 @@ const VehicleType = ({ mode: propMode }) => {
             </select>
           </div>
 
+          <div className="lg:col-span-2">
+            <label className={labelClass}>App Modules</label>
+            <p className="mb-3 text-xs font-medium text-slate-500">
+              Pick which home-screen modules offer this vehicle. Leave every box clear to
+              offer it under all of them.
+            </p>
+            {appModules.length === 0 ? (
+              <p className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-xs font-medium text-slate-500">
+                No app modules configured yet. Add them under Settings &rarr; App Modules.
+              </p>
+            ) : (
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+                {appModules.map((module) => {
+                  const moduleId = String(module._id || module.id || '');
+                  const selected = (formData.app_modules || []).includes(moduleId);
+
+                  return (
+                    <button
+                      key={moduleId}
+                      type="button"
+                      onClick={() => {
+                        const current = Array.isArray(formData.app_modules) ? formData.app_modules : [];
+                        updateForm(
+                          'app_modules',
+                          selected
+                            ? current.filter((item) => item !== moduleId)
+                            : [...current, moduleId],
+                        );
+                      }}
+                      className={`flex items-center gap-3 rounded-[20px] border p-3 text-left transition-all ${
+                        selected
+                          ? 'border-[#0047AB] bg-[#EEF4FF] shadow-md'
+                          : 'border-slate-200 bg-white hover:border-slate-300 hover:shadow-sm'
+                      }`}
+                    >
+                      {module.mobile_menu_icon ? (
+                        <img
+                          src={module.mobile_menu_icon}
+                          alt={module.name || 'Module'}
+                          className="h-10 w-10 shrink-0 rounded-xl object-contain"
+                        />
+                      ) : (
+                        <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-slate-100">
+                          <Car size={16} className="text-slate-400" />
+                        </span>
+                      )}
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-sm font-black text-slate-900">
+                          {module.name || 'Module'}
+                        </span>
+                        <span className="block truncate text-xs font-medium text-slate-500">
+                          {module.short_description || module.transport_type || ''}
+                        </span>
+                      </span>
+                      <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full border ${
+                        selected ? 'border-[#0047AB] bg-[#0047AB] text-white' : 'border-slate-300 bg-white'
+                      }`}>
+                        {selected ? <CheckCircle2 size={12} /> : null}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
           {showsDeliveryCategorySelector ? (
             <div className="lg:col-span-2">
               <label className={labelClass}>Delivery Category *</label>
@@ -1031,6 +1186,44 @@ const VehicleType = ({ mode: propMode }) => {
                     placeholder="12"
                     disabled={!formData.delivery_distance_pricing?.enabled}
                   />
+                </div>
+
+                <div>
+                  <label className={labelClass}>Free Waiting (min)</label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={formData.delivery_distance_pricing?.free_time ?? ''}
+                    onChange={(e) => updateForm('delivery_distance_pricing', {
+                      ...formData.delivery_distance_pricing,
+                      free_time: e.target.value,
+                    })}
+                    className={inputClass}
+                    placeholder="5"
+                    disabled={!formData.delivery_distance_pricing?.enabled}
+                  />
+                  <p className="mt-2 text-[11px] font-medium text-slate-400">
+                    Minutes the driver waits at pickup before charging.
+                  </p>
+                </div>
+
+                <div>
+                  <label className={labelClass}>Waiting Charge (per min)</label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={formData.delivery_distance_pricing?.time_price ?? ''}
+                    onChange={(e) => updateForm('delivery_distance_pricing', {
+                      ...formData.delivery_distance_pricing,
+                      time_price: e.target.value,
+                    })}
+                    className={inputClass}
+                    placeholder="1"
+                    disabled={!formData.delivery_distance_pricing?.enabled}
+                  />
+                  <p className="mt-2 text-[11px] font-medium text-slate-400">
+                    Default for every zone. A zone's row in Set Prices overrides it.
+                  </p>
                 </div>
 
                 <div>

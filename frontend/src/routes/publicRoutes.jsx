@@ -1,8 +1,8 @@
 import { Route } from 'react-router-dom';
 import UserProtectedRoute, { UserHomeRoute } from '../guards/UserProtectedRoute';
+import landingRoutes from '../modules/landing/landingRoutes';
 import RideComplete from '../modules/user/pages/ride/RideComplete';
 import {
-  AboutPage,
   Activity,
   AddressSettings,
   AirportCab,
@@ -12,20 +12,23 @@ import {
   BusConfirm,
   BusDetails,
   BusHome,
+  BusPartnerDashboard,
+  BusPartnerLogin,
+  BusPartnerOnboarding,
+  BusPartnerStatus,
+  BusPreview,
   BusList,
   BusSeats,
   CabHome,
   CabSharing,
   CareersPage,
   ComingSoon,
-  ContactPage,
   DeleteAccount,
   FaqPage,
   IntercityConfirm,
   IntercityDetails,
   IntercityHome,
   IntercityVehicle,
-  LandingPage,
   LegalPage,
   LinksPage,
   Login,
@@ -51,7 +54,6 @@ import {
   SelectLocation,
   SelectVehicle,
   SenderReceiverDetails,
-  ServicesPage,
   SharedTaxi,
   SharedTaxiConfirm,
   SharedTaxiSeats,
@@ -75,12 +77,13 @@ import {
 
 const publicRoutes = (
   <>
-    <Route path="/" element={<LandingPage />} />
-    <Route path="/about" element={<AboutPage />} />
-    <Route path="/contact" element={<ContactPage />} />
+    {/* ZI CAB marketing site: /, /about, /services, /corporate, /partner,
+        /drive-with-us, /advertise, /contact. It replaces the previous
+        LandingPage/AboutPage/ContactPage/ServicesPage, which are left in the
+        tree but no longer routed. */}
+    {landingRoutes}
     <Route path="/support" element={<SupportPage />} />
     <Route path="/faq" element={<FaqPage />} />
-    <Route path="/services" element={<ServicesPage />} />
     <Route path="/blog" element={<BlogPage />} />
     <Route path="/careers" element={<CareersPage />} />
     <Route path="/links" element={<LinksPage />} />
@@ -90,6 +93,7 @@ const publicRoutes = (
     <Route path="/privacy-policy" element={<LegalPage />} />
     <Route path="/refund" element={<LegalPage />} />
     <Route path="/cancellation" element={<LegalPage />} />
+    <Route path="/data-deletion" element={<LegalPage />} />
     <Route path="/phonepe/status" element={<PhonePeStatusPage />} />
     <Route path="/razorpay/launch" element={<RazorpayLaunchPage />} />
     <Route path="/razorpay/status" element={<RazorpayStatusPage />} />
@@ -97,6 +101,12 @@ const publicRoutes = (
     <Route path="/onboarding" element={<Onboarding />} />
     <Route path="/verify-otp" element={<VerifyOTP />} />
     <Route path="/signup" element={<Signup />} />
+    {/* Bus partners: their own login and dashboard, not the rider's /bus pages,
+        so they sit outside the rider login below. */}
+    <Route path="/bus-login" element={<BusPartnerLogin />} />
+    <Route path="/bus-register" element={<BusPartnerOnboarding />} />
+    <Route path="/bus-register/status" element={<BusPartnerStatus />} />
+    <Route path="/bus-dashboard" element={<BusPartnerDashboard />} />
     <Route element={<UserAppLayout />}>
       <Route path="/user" element={<UserHomeRoute />} />
     </Route>
@@ -150,7 +160,10 @@ const publicRoutes = (
       <Route path="/cab/spiritual-confirm" element={<SpiritualTripConfirm />} />
       <Route path="/bus/list" element={<BusList />} />
       <Route path="/bus/seats" element={<BusSeats />} />
-      <Route path="/bus/details" element={<BusDetails />} />
+      {/* Same steps as the signed-in /taxi/user/bus routes: details is the bus
+          preview, then seats, then checkout (review and pay). */}
+      <Route path="/bus/details" element={<BusPreview />} />
+      <Route path="/bus/checkout" element={<BusDetails />} />
       <Route path="/bus/confirm" element={<BusConfirm />} />
       <Route path="/tours" element={<ComingSoon />} />
 

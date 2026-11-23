@@ -41,8 +41,13 @@ export const computePromoDiscount = ({ fare, promo, userCounter }) => {
   }
 
   const discountPercentage = clamp(Number(promo?.discount_percentage || 0), 0, 100);
-  const rawDiscount = safeFare * (discountPercentage / 100);
   const maximumDiscountAmount = Math.max(0, Number(promo?.maximum_discount_amount || 0));
+  // The admin form accepts a percentage or an amount. With no percentage the
+  // amount is the discount itself - read only as a cap, a 0% code took nothing
+  // off and was refused at every booking.
+  const rawDiscount = discountPercentage > 0
+    ? safeFare * (discountPercentage / 100)
+    : Math.min(safeFare, maximumDiscountAmount);
 
   const cappedDiscount = maximumDiscountAmount > 0 ? Math.min(rawDiscount, maximumDiscountAmount) : rawDiscount;
 
@@ -358,7 +363,12 @@ export const listAvailablePromosForUser = async ({
   now = new Date(),
   limit = 50,
 }) => {
-  const serviceLocationId = toObjectIdOrThrow(service_location_id, 'service location id');
+  // Optional: the rider app asks without one. With no location every live
+  // offer is listed, and the city check still happens when the code is applied
+  // to a booking.
+  const serviceLocationId = service_location_id
+    ? toObjectIdOrThrow(service_location_id, 'service location id')
+    : null;
   const transportType = normalizeTransportType(transport_type);
   const safeLimit = Math.min(100, Math.max(1, Number(limit) || 50));
 
@@ -367,20 +377,26 @@ export const listAvailablePromosForUser = async ({
     from_date: { $lte: now },
     to_date: { $gte: now },
     transport_type: { $in: ['all', transportType] },
-    $and: [
-      {
-        $or: [
-          { service_location_id: serviceLocationId },
-          { service_location_ids: serviceLocationId },
-        ],
-      },
-    ],
+    $and: serviceLocationId
+      ? [
+          {
+            $or: [
+              { service_location_id: serviceLocationId },
+              { service_location_ids: serviceLocationId },
+            ],
+          },
+        ]
+      : [],
   };
 
   if (userId) {
     query.$and.push({ $or: [{ user_specific: { $ne: true } }, { user_id: String(userId) }] });
   } else {
     query.user_specific = { $ne: true };
+  }
+
+  if (query.$and.length === 0) {
+    delete query.$and;
   }
 
   const promos = await PromoCode.find(query).sort({ createdAt: -1 }).limit(safeLimit).lean();

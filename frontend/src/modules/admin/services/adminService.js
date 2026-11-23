@@ -9,6 +9,7 @@ export const adminService = {
   verifyResetOtp: (data) => api.post('/admin/verify-reset-otp', data),
   resetPassword: (data) => api.post('/admin/reset-password', data),
   getAdmins: () => api.get('/admin/admin-management/admins'),
+  getAdminActivitySummary: () => api.get('/admin/admin-management/activity-summary'),
   createAdminAccount: (data) => api.post('/admin/admin-management/admins', data),
   updateAdminAccount: (id, data) => api.patch(`/admin/admin-management/admins/${id}`, data),
   deleteAdminAccount: (id) => api.delete(`/admin/admin-management/admins/${id}`),
@@ -90,6 +91,8 @@ export const adminService = {
 
   adjustDriverWallet: (id, data) => api.post(`/admin/wallet/drivers/${id}/adjust`, data),
   getDriverWalletHistory: (id) => api.get(`/admin/wallet/drivers/${id}/history`),
+  getDriverCancellationLimit: (id) => api.get(`/admin/drivers/${id}/cancellation-limit`),
+  resetDriverCancellationLimit: (id) => api.post(`/admin/drivers/${id}/cancellation-limit/reset`),
   getDriverWithdrawalSummaries: (params = {}) => api.get('/admin/wallet/drivers/withdrawals', { params }),
   getDriverWithdrawals: (driverId, params = {}) => api.get(`/admin/wallet/drivers/${driverId}/withdrawals`, { params }),
   getDriverWithdrawalContextByRequestId: (requestId, params = {}) =>
@@ -101,6 +104,15 @@ export const adminService = {
   getOwnerWalletHistory: (id) => api.get(`/admin/wallet/owners/${id}/history`),
 
   getReferralDashboard: () => api.get('/admin/referral/dashboard'),
+  getRewardSettings: () => api.get('/admin/rewards/settings'),
+  updateRewardSettings: (data) => api.patch('/admin/rewards/settings', data),
+  getRewardLevels: (params = {}) => api.get('/admin/rewards/levels', { params }),
+  createRewardLevel: (data) => api.post('/admin/rewards/levels', data),
+  updateRewardLevel: (id, data) => api.patch(`/admin/rewards/levels/${id}`, data),
+  deleteRewardLevel: (id) => api.delete(`/admin/rewards/levels/${id}`),
+  uploadRewardImage: (image) => api.post('/admin/rewards/upload-image', { image }),
+  getRewardClaims: (params = {}) => api.get('/admin/rewards/claims', { params }),
+  updateRewardClaim: (id, data) => api.patch(`/admin/rewards/claims/${id}`, data),
 
   /**
    * Subscription Management
@@ -111,6 +123,9 @@ export const adminService = {
   updateSubscriptionSettings: (data) => api.post('/admin/driver-subscriptions/settings', data),
   getUserSubscriptionPlans: () => api.get('/admin/user-subscriptions/plans/list'),
   createUserSubscriptionPlan: (planData) => api.post('/admin/user-subscriptions/plans/create', planData),
+  updateUserSubscriptionPlan: (id, planData) => api.patch(`/admin/user-subscriptions/plans/${id}`, planData),
+  updateUserSubscriptionExpiry: (id, body) => api.patch(`/admin/user-subscriptions/${id}/expiry`, body),
+  updateDriverPassExpiry: (id, body) => api.patch(`/admin/driver-subscriptions/passes/${id}/expiry`, body),
   getUserSubscriptionsByUserId: (id) => api.get(`/admin/users/${id}/subscriptions`),
   
   /**
@@ -194,6 +209,8 @@ export const adminService = {
   getTodayEarnings: () => api.get('/admin/dashboard/today-earnings'),
   getOverallEarnings: () => api.get('/admin/dashboard/overall-earnings'),
   getCancelChart: () => api.get('/admin/dashboard/cancel-chart'),
+  cancelRideRequest: (id, reason = '') => api.post(`/admin/ride-requests/${id}/cancel`, { reason }),
+  deleteRideRequest: (id) => api.delete(`/admin/ride-requests/${id}`),
   getSafetyAlerts: ({ page = 1, limit = 25, status = 'active' } = {}) =>
     api.get(`/admin/safety/alerts?page=${page}&limit=${limit}&status=${encodeURIComponent(status)}`),
   resolveSafetyAlert: (id, note = '') => api.patch(`/admin/safety/alerts/${id}/resolve`, { note }),
@@ -222,8 +239,10 @@ export const adminService = {
    * Notifications & Banners
    */
   getPromotionsBootstrap: () => api.get('/admin/promotions/bootstrap'),
+  getBusUpcomingBookings: (busId) => api.get(`/admin/bus-services/${busId}/upcoming-bookings`),
   getNotifications: () => api.get('/admin/notifications'),
   sendNotification: (data) => api.post('/admin/notifications/send', data),
+  getNotificationAudience: (params) => api.get('/admin/notifications/audience', { params }),
   deleteNotification: (id) => api.delete(`/admin/notifications/${id}`),
   getBanners: () => api.get('/admin/banners'),
 
@@ -283,6 +302,16 @@ export const adminService = {
   cancelAdminBusBookingSeats: (id, payload = {}) => api.post(`/admin/bus-bookings/${id}/cancel`, payload),
 
   uploadImage: (image) => api.post('/admin/upload-image', { image }),
+
+  /**
+   * Public marketing site content (CMS).
+   * PUT accepts a partial - only the sections present are written.
+   */
+  getWebsiteEnquiries: (params) => api.get('/admin/enquiries', { params }),
+  updateWebsiteEnquiry: (id, payload) => api.patch(`/admin/enquiries/${id}`, payload),
+
+  getLandingContent: () => api.get('/admin/landing-content'),
+  updateLandingContent: (payload) => api.put('/admin/landing-content', payload),
 
   /**
    * Languages Management (Master)
@@ -354,6 +383,7 @@ export const adminService = {
   updateMapSettings: (data) => api.patch('/admin/integration-settings/map', data),
   getMailSettings: () => api.get('/admin/integration-settings/mail'),
   updateMailSettings: (data) => api.patch('/admin/integration-settings/mail', data),
+  sendTestMail: (to) => api.post('/admin/integration-settings/mail/test', { to }),
   getRechargeApiSettings: () => api.get('/admin/integration-settings/recharge-api'),
   updateRechargeApiSettings: (data) => api.patch('/admin/integration-settings/recharge-api', data),
   generateRechargeApiToken: () => api.post('/admin/integration-settings/recharge-api/generate-token'),

@@ -1,12 +1,22 @@
+import mongoose from 'mongoose';
 import { ApiError } from '../../../utils/ApiError.js';
 import { normalizePoint } from '../../../utils/geo.js';
 import { DISPATCH_TOP_DRIVERS } from '../constants/index.js';
 import { Vehicle } from '../admin/models/Vehicle.js';
 import { Driver } from '../driver/models/Driver.js';
 import { Zone } from '../driver/models/Zone.js';
+import { DriverSubscription } from '../driver/models/DriverSubscription.js';
+import { resolveDriverSubscriptionSettings } from '../driver/services/driverSubscriptionService.js';
 import { getDriverIdsBlockedByUpcomingScheduledRides } from './rideService.js';
 
 const EARTH_RADIUS_METERS = 6371000;
+
+// A driver is only offered rides while their phone is reporting GPS. The app
+// sends a fix at least every 30 s while online (a heartbeat when parked), so
+// three minutes leaves room for a dropped connection. Older than that, the
+// stored point is wherever the app was killed - drivers 8 km from a pickup were
+// being matched as if they were still next to it.
+export const DRIVER_LOCATION_FRESH_MS = 3 * 60 * 1000;
 
 const normalizeVehicleKey = (value = '') => String(value || '').trim().toLowerCase();
 
@@ -32,13 +42,39 @@ const normalizeVehicleTypeIds = (vehicleTypeIds = [], vehicleTypeId = null) => {
   return [...new Set(values.map((value) => String(value || '').trim()).filter(Boolean))];
 };
 
+/**
+ * A filter limiting dispatch to drivers holding a paid pass, or {} when the
+ * settings do not require one.
+ */
+const buildSubscriptionDriverFilter = async () => {
+  const settings = await resolveDriverSubscriptionSettings();
+  const requiresPass =
+    settings.mode === 'subscription_only' || (settings.mode === 'both' && settings.onExpiry === 'block');
+
+  if (!requiresPass) return {};
+
+  const subscribed = await DriverSubscription.find(
+    { status: 'active', paidAt: { $ne: null }, expiresAt: { $gt: new Date() } },
+    { driverId: 1 },
+  ).lean();
+
+  return { _id: { $in: subscribed.map((row) => row.driverId) } };
+};
+
 const buildDriverMatchFilters = ({ zoneId, serviceLocationId, vehicleTypeId, vehicleTypeIds, vehicleTypeKeys }) => {
   const normalizedVehicleTypeIds = normalizeVehicleTypeIds(vehicleTypeIds, vehicleTypeId);
   const normalizedVehicleTypeKeys = Array.isArray(vehicleTypeKeys)
     ? [...new Set(vehicleTypeKeys.map(normalizeVehicleKey).filter(Boolean))]
     : [];
   const vehicleTypeClauses = normalizedVehicleTypeIds.length
-    ? [{ vehicleTypeId: { $in: normalizedVehicleTypeIds } }]
+    ? [
+        { vehicleTypeId: { $in: normalizedVehicleTypeIds } },
+        // A driver enrolled in more than one category at onboarding stores
+        // them in vehicleTypeIds; vehicleTypeId (above) only ever holds the
+        // first/primary one. Checking both means a driver whose primary
+        // type is A but who also enrolled in B still gets offered a B ride.
+        { vehicleTypeIds: { $in: normalizedVehicleTypeIds } },
+      ]
     : [
         ...(normalizedVehicleTypeKeys.length
           ? [
@@ -52,16 +88,23 @@ const buildDriverMatchFilters = ({ zoneId, serviceLocationId, vehicleTypeId, veh
       ? { $or: vehicleTypeClauses }
       : vehicleTypeClauses[0] || {};
 
-  return {
-    isOnline: true,
-    isOnRide: false,
+  // Both conditions are `$or`s, so they go under `$and`: spreading the vehicle
+  // filter into the same object used to overwrite the wallet check, and drivers
+  // with a blocked wallet were offered any ride that named a vehicle type.
+  const walletFilter = {
     $or: [
       { owner_id: { $ne: null } },
       { 'wallet.isBlocked': { $ne: true } },
     ],
+  };
+
+  return {
+    isOnline: true,
+    isOnRide: false,
+    locationUpdatedAt: { $gte: new Date(Date.now() - DRIVER_LOCATION_FRESH_MS) },
+    $and: [walletFilter, ...(Object.keys(vehicleTypeFilter).length ? [vehicleTypeFilter] : [])],
     ...(zoneId ? { zoneId } : {}),
     ...(serviceLocationId ? { service_location_id: serviceLocationId } : {}),
-    ...vehicleTypeFilter,
   };
 };
 
@@ -78,23 +121,66 @@ const buildZoneIntersectionQuery = (coordinates) => ({
   },
 });
 
+/// Rough area of a zone's outer ring in km2 - enough to rank zones by size,
+/// which is all it is used for. Shoelace on a local equirectangular projection.
+const approximateZoneAreaKm2 = (zone) => {
+  const ring = zone?.geometry?.coordinates?.[0];
+  if (!Array.isArray(ring) || ring.length < 4) {
+    return Number.POSITIVE_INFINITY;
+  }
+
+  const meanLatRadians = (ring.reduce((sum, point) => sum + Number(point[1]), 0) / ring.length) * (Math.PI / 180);
+  const kmPerDegreeLng = 111.32 * Math.cos(meanLatRadians);
+  const kmPerDegreeLat = 110.57;
+  let twiceArea = 0;
+  for (let i = 0; i < ring.length - 1; i += 1) {
+    twiceArea += (ring[i][0] * kmPerDegreeLng) * (ring[i + 1][1] * kmPerDegreeLat)
+      - (ring[i + 1][0] * kmPerDegreeLng) * (ring[i][1] * kmPerDegreeLat);
+  }
+  return Math.abs(twiceArea / 2);
+};
+
+/// The most specific zone containing a point: the smallest one.
+///
+/// Zones can nest - a city inside a state-wide catch-all - and the city is the
+/// one whose prices and drivers should apply. The previous rule was "newest
+/// wins", which made correctness depend on the order zones were created or
+/// last edited: adding a state zone would have taken every city inside it, and
+/// merely saving a city zone later would have handed it back. Newest is kept
+/// only as the tie-break between zones of the same size.
+const pickMostSpecificZone = (zones = []) => {
+  if (!zones.length) {
+    return null;
+  }
+
+  return [...zones].sort((a, b) => {
+    const byArea = approximateZoneAreaKm2(a) - approximateZoneAreaKm2(b);
+    if (byArea !== 0) {
+      return byArea;
+    }
+    return new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0);
+  })[0];
+};
+
 export const findZoneByPickup = async (pickupCoords, options = {}) => {
   const coordinates = normalizePoint(pickupCoords, 'pickupCoords');
   const normalizedServiceLocationId = String(options?.serviceLocationId || '').trim();
 
   if (normalizedServiceLocationId) {
-    const preferredZone = await Zone.findOne({
+    const preferredZones = await Zone.find({
       ...buildZoneIntersectionQuery(coordinates),
       service_location_id: normalizedServiceLocationId,
-    }).sort({ updatedAt: -1, createdAt: -1 });
+    });
+    const preferredZone = pickMostSpecificZone(preferredZones);
 
     if (preferredZone) {
       return preferredZone;
     }
   }
 
-  // Zones are authoritative for dispatch. If polygons overlap, prefer the newest active zone.
-  return Zone.findOne(buildZoneIntersectionQuery(coordinates)).sort({ updatedAt: -1, createdAt: -1 });
+  // Zones are authoritative for dispatch. A point rarely sits in more than two
+  // or three, so fetching them all and ranking here costs next to nothing.
+  return pickMostSpecificZone(await Zone.find(buildZoneIntersectionQuery(coordinates)));
 };
 
 const toLocalMeters = (origin, target) => {
@@ -169,20 +255,38 @@ const getDistanceBetweenMeters = (origin, target) => {
   return Math.round(2 * EARTH_RADIUS_METERS * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
 };
 
+/// Where the driver actually is. The admin's search radius and the zone are
+/// always measured from here. Route-booking drivers used to be measured from
+/// their saved route pin instead, so a driver 10 km away whose pin sat near
+/// the pickup was offered the ride (and their card showed the real 10 km).
 const getDriverMatchCoordinates = (driver = {}) => {
+  if (Array.isArray(driver?.location?.coordinates) && driver.location.coordinates.length === 2) {
+    try {
+      return normalizePoint(driver.location.coordinates, 'driver.location.coordinates');
+    } catch {
+      return null;
+    }
+  }
+
+  return null;
+};
+
+/// A route-booking driver only wants rides near their saved pin; that is an
+/// extra condition on top of being within range, never a substitute for it.
+const getRouteBookingAnchorCoordinates = (driver = {}) => {
   const anchorCoordinates = Array.isArray(driver?.routeBooking?.anchorLocation?.coordinates)
     ? driver.routeBooking.anchorLocation.coordinates
     : [];
 
-  if (driver?.routeBooking?.enabled && anchorCoordinates.length === 2) {
+  if (!driver?.routeBooking?.enabled || anchorCoordinates.length !== 2) {
+    return null;
+  }
+
+  try {
     return normalizePoint(anchorCoordinates, 'driver.routeBooking.anchorLocation.coordinates');
+  } catch {
+    return null;
   }
-
-  if (Array.isArray(driver?.location?.coordinates) && driver.location.coordinates.length === 2) {
-    return normalizePoint(driver.location.coordinates, 'driver.location.coordinates');
-  }
-
-  return null;
 };
 
 const isPointInsidePolygonRing = (point, ring = []) => {
@@ -238,7 +342,14 @@ const filterDriversForMatchedZone = ({ drivers = [], zone = null, pickupCoords, 
     }
 
     if (Number.isFinite(maxDistance) && maxDistance > 0) {
-      return getDistanceBetweenMeters(pickupCoords, coordinates) <= maxDistance;
+      if (getDistanceBetweenMeters(pickupCoords, coordinates) > maxDistance) {
+        return false;
+      }
+
+      const anchor = getRouteBookingAnchorCoordinates(driver);
+      if (driver?.routeBooking?.enabled) {
+        return Boolean(anchor) && getDistanceBetweenMeters(pickupCoords, anchor) <= maxDistance;
+      }
     }
 
     return true;
@@ -256,17 +367,19 @@ const buildGeoNearFilter = (field, coordinates, maxDistance) => ({
   },
 });
 
-const getDispatchAnchorCoordinates = (driver = {}) => {
-  const routeCoordinates = Array.isArray(driver?.routeBooking?.anchorLocation?.coordinates)
-    ? driver.routeBooking.anchorLocation.coordinates
-    : [];
+// Nearest first by where drivers really are, route-booking or not.
+const getDispatchAnchorCoordinates = (driver = {}) =>
+  Array.isArray(driver?.location?.coordinates) ? driver.location.coordinates : [];
 
-  if (driver?.routeBooking?.enabled && routeCoordinates.length === 2) {
-    return routeCoordinates;
-  }
-
-  return Array.isArray(driver?.location?.coordinates) ? driver.location.coordinates : [];
-};
+// Radius check on a field that already has a `$near` elsewhere in the query
+// (MongoDB allows only one `$near` per query).
+const buildGeoWithinFilter = (field, coordinates, maxDistance) => ({
+  [field]: {
+    $geoWithin: {
+      $centerSphere: [coordinates, maxDistance / EARTH_RADIUS_METERS],
+    },
+  },
+});
 
 const sortDriversByDispatchAnchorDistance = (drivers = [], pickupCoords) =>
   [...drivers]
@@ -292,15 +405,31 @@ const findDriversForZone = async ({
   normalizedVehicleTypeIds,
   vehicleTypeKeys,
   strictZoneOnly = false,
+  excludeDriverIds = [],
 }) => {
-  const commonFilters = buildDriverMatchFilters({
-    zoneId,
-    serviceLocationId,
-    vehicleTypeIds: normalizedVehicleTypeIds,
-    vehicleTypeKeys,
-  });
+  // When a daily pass is required - either as the only model, or because an
+  // expired pass is set to stop rides - drivers without one are not offered
+  // work. Off entirely unless an admin has switched it on, and the id list
+  // is small: it is one day's paying drivers.
+  const passFilter = await buildSubscriptionDriverFilter();
+  // Drivers this ride was already offered to (or who said no) are left out in
+  // the query itself; filtering them after the limit returned the same few
+  // nearest drivers on every retry and never reached anyone further away.
+  const idFilter = {
+    ...(passFilter._id || {}),
+    ...(excludeDriverIds.length ? { $nin: excludeDriverIds } : {}),
+  };
+  const commonFilters = {
+    ...buildDriverMatchFilters({
+      zoneId,
+      serviceLocationId,
+      vehicleTypeIds: normalizedVehicleTypeIds,
+      vehicleTypeKeys,
+    }),
+    ...(Object.keys(idFilter).length ? { _id: idFilter } : {}),
+  };
   const selectedFields =
-    'name phone socketId vehicleTypeId vehicleType vehicleIconType vehicleNumber vehicleColor vehicleMake vehicleModel rating location zoneId service_location_id isOnline isOnRide routeBooking';
+    'name phone socketId vehicleTypeId vehicleTypeIds vehicleType vehicleIconType vehicleNumber vehicleColor vehicleMake vehicleModel rating location zoneId service_location_id isOnline isOnRide routeBooking';
 
   const [liveLocationDrivers, routeBookingDrivers] = await Promise.all([
     Driver.find({
@@ -315,7 +444,14 @@ const findDriversForZone = async ({
       'routeBooking.enabled': true,
       'routeBooking.anchorLocation': { $ne: null },
       'routeBooking.anchorLocation.coordinates.1': { $exists: true },
-      ...(strictZoneOnly ? {} : buildGeoNearFilter('routeBooking.anchorLocation', coordinates, effectiveMaxDistance)),
+      // Within range of the pickup where they are now, and their route pin
+      // also near the pickup.
+      ...(strictZoneOnly
+        ? {}
+        : {
+            ...buildGeoNearFilter('location', coordinates, effectiveMaxDistance),
+            ...buildGeoWithinFilter('routeBooking.anchorLocation', coordinates, effectiveMaxDistance),
+          }),
     })
       .limit(limit)
       .select(selectedFields),
@@ -339,7 +475,12 @@ export const matchDrivers = async (pickupCoords, options = {}) => {
     serviceLocationId = null,
     allowCrossZoneFallback = true,
     strictZoneOnly = false,
+    excludeDriverIds = [],
   } = options;
+  const excluded = [...new Set((excludeDriverIds || []).map((id) => String(id || '')).filter((id) => mongoose.Types.ObjectId.isValid(id)))];
+  // Ask for more than needed: the zone and scheduled-ride checks below drop
+  // some, and only `limit` are returned.
+  const poolSize = Math.max(limit * 4, 20);
   const normalizedVehicleTypeIds = normalizeVehicleTypeIds(vehicleTypeIds, vehicleTypeId);
   const allowedVehicles = normalizedVehicleTypeIds.length
     ? await Vehicle.find({ _id: { $in: normalizedVehicleTypeIds } }).select('name vehicle_type icon_types').lean()
@@ -348,19 +489,22 @@ export const matchDrivers = async (pickupCoords, options = {}) => {
 
   const zone = await findZoneByPickup(coordinates, { serviceLocationId });
   const zoneBoundaryCapMeters = zone ? getZoneBoundaryCapMeters(zone, coordinates) : null;
-  const effectiveMaxDistance = Number.isFinite(zoneBoundaryCapMeters) && zoneBoundaryCapMeters >= 0
-    ? Math.min(Math.max(1, Math.round(maxDistance)), Math.max(1, zoneBoundaryCapMeters))
-    : Math.max(1, Math.round(maxDistance));
+  // The admin's radius, as set. It used to be cut to the distance from the
+  // pickup to the zone edge, so a pickup near a boundary searched only a few
+  // hundred metres. Drivers outside the zone are still dropped by
+  // filterDriversForMatchedZone below.
+  const effectiveMaxDistance = Math.max(1, Math.round(maxDistance));
 
   let drivers = await findDriversForZone({
     zoneId: zone?._id || null,
     serviceLocationId,
     coordinates,
     effectiveMaxDistance,
-    limit,
+    limit: poolSize,
     normalizedVehicleTypeIds,
     vehicleTypeKeys,
     strictZoneOnly,
+    excludeDriverIds: excluded,
   });
   drivers = filterDriversForMatchedZone({
     drivers,
@@ -380,10 +524,11 @@ export const matchDrivers = async (pickupCoords, options = {}) => {
       serviceLocationId,
       coordinates,
       effectiveMaxDistance,
-      limit,
+      limit: poolSize,
       normalizedVehicleTypeIds,
       vehicleTypeKeys,
       strictZoneOnly,
+      excludeDriverIds: excluded,
     });
     drivers = filterDriversForMatchedZone({
       drivers,
@@ -400,7 +545,7 @@ export const matchDrivers = async (pickupCoords, options = {}) => {
 
   return {
     zone,
-    drivers,
+    drivers: drivers.slice(0, limit),
     searchRadiusMeters: effectiveMaxDistance,
     zoneBoundaryCapMeters,
   };

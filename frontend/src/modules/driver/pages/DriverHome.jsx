@@ -30,6 +30,8 @@ import toast from 'react-hot-toast';
 import MapGrid from '../../../assets/premium_grid_map.png';
 import DriverBottomNav from '../../shared/components/DriverBottomNav';
 import IncomingRideRequest from './IncomingRideRequest';
+import { DriverSurgeCard, DriverSurgeLayer } from '../components/DriverSurgeLayer';
+import { useDriverSurges } from '../components/useDriverSurges';
 import api from '../../../shared/api/axiosInstance';
 import { useSettings } from '../../../shared/context/SettingsContext';
 import { uploadService } from '../../../shared/services/uploadService';
@@ -72,6 +74,7 @@ const DEFAULT_MAP_CENTER = {
 };
 
 const DEFAULT_MAP_COORDS = [75.8577, 22.7196];
+const CANCEL_PERIOD_WORDS = { day: 'today', week: 'this week', month: 'this month' };
 const ONLINE_LOCATION_EMIT_MIN_DISTANCE_METERS = 25;
 const ONLINE_LOCATION_EMIT_MIN_INTERVAL_MS = 12000;
 
@@ -380,6 +383,7 @@ const createScheduledRidePreview = (ride) => ({
     raw: {
         fare: ride.fare,
         baseFare: ride.baseFare,
+        surgeMultiplier: Number(ride.surgeMultiplier || ride.surge?.multiplier || 1),
         bookingMode: ride.bookingMode || 'normal',
         parcel: ride.parcel || null,
         intercity: ride.intercity || null,
@@ -648,6 +652,8 @@ const DriverHome = () => {
     const [selectedScheduledRide, setSelectedScheduledRide] = useState(null);
     const [scheduleNow, setScheduleNow] = useState(() => Date.now());
     const [cancellingScheduledRideId, setCancellingScheduledRideId] = useState('');
+    const [cancellationLimit, setCancellationLimit] = useState(null);
+    const cancellationsUsedUp = Boolean(cancellationLimit?.enabled && cancellationLimit.remaining <= 0);
     const [acceptingRideId, setAcceptingRideId] = useState('');
     const [isHydratingDriver, setIsHydratingDriver] = useState(true);
     const [isTogglingDuty, setIsTogglingDuty] = useState(false);
@@ -690,6 +696,8 @@ const DriverHome = () => {
         emittedAt: 0,
     });
     const driverPosition = useMemo(() => toLatLng(driverCoords || DEFAULT_MAP_COORDS), [driverCoords]);
+    // Surge areas near the driver, only while online - the map Rapido drivers use to chase demand.
+    const surgeAreas = useDriverSurges(driverCoords ? driverPosition : null, isOnline);
     const mapVehicleIcon = useMemo(
         () => getMapIconForVehicle(vehicleIconUrl || vehicleIconType),
         [vehicleIconType, vehicleIconUrl],
@@ -764,6 +772,7 @@ const DriverHome = () => {
         try {
             const response = await getDriverScheduledRides({ limit: 20 });
             const results = response?.data?.results || [];
+            setCancellationLimit(response?.data?.cancellationLimit || null);
             const nextScheduledRides = results
                 .filter((ride) => ride?.scheduledAt)
                 .sort((firstRide, secondRide) => new Date(firstRide.scheduledAt).getTime() - new Date(secondRide.scheduledAt).getTime());
@@ -802,6 +811,7 @@ const DriverHome = () => {
             await loadScheduledRides();
         } catch (error) {
             toast.error(error?.response?.data?.message || error?.message || 'Failed to cancel scheduled ride');
+            loadScheduledRides();
         } finally {
             setCancellingScheduledRideId('');
         }
@@ -2081,11 +2091,15 @@ const DriverHome = () => {
                 mode="preview"
                 onPreviewCancel={handleCancelScheduledRide}
                 isPreviewCancelling={cancellingScheduledRideId === selectedScheduledRide?.rideId}
-                canPreviewCancel={Boolean(selectedScheduledRide?.isAssignedToCurrentDriver)}
-                previewCancelDisabledLabel="Not assigned yet"
+                canPreviewCancel={Boolean(selectedScheduledRide?.isAssignedToCurrentDriver) && !cancellationsUsedUp}
+                previewCancelDisabledLabel={selectedScheduledRide?.isAssignedToCurrentDriver ? 'No cancellations left' : 'Not assigned yet'}
                 previewCancelHelpText={
                     selectedScheduledRide?.isAssignedToCurrentDriver
-                        ? 'Cancelling here will also notify the user immediately.'
+                        ? cancellationsUsedUp
+                            ? `You've used all your cancellations ${CANCEL_PERIOD_WORDS[cancellationLimit?.period] || ''}. Contact support to cancel this ride.`
+                            : cancellationLimit?.enabled
+                                ? `Cancelling here will also notify the user immediately. ${cancellationLimit.remaining} cancellation${cancellationLimit.remaining === 1 ? '' : 's'} left ${CANCEL_PERIOD_WORDS[cancellationLimit.period] || ''}.`
+                                : 'Cancelling here will also notify the user immediately.'
                         : 'This scheduled request is visible to you, but only a ride already assigned to you can be cancelled from here.'
                 }
                 onClose={() => setSelectedScheduledRide(null)}
@@ -2455,6 +2469,7 @@ const DriverHome = () => {
                                 anchor: new window.google.maps.Point(20, 20)
                             }} 
                         />
+                        <DriverSurgeLayer areas={surgeAreas} />
                     </GoogleMap>
                 ) : (
                     <div className="w-full h-full bg-slate-200 flex items-center justify-center">
@@ -2479,6 +2494,11 @@ const DriverHome = () => {
 
             {/* --- BOTTOM FLOATING UI --- */}
             <div className="fixed bottom-20 left-0 right-0 p-6 pb-4 z-[60] flex flex-col max-w-md mx-auto">
+                {isOnline && surgeAreas.length > 0 ? (
+                    <div className="mb-3">
+                        <DriverSurgeCard areas={surgeAreas} />
+                    </div>
+                ) : null}
                 <AnimatePresence>
                     {statusMessage ? (
                         <motion.div

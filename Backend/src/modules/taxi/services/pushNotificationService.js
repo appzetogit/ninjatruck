@@ -1,6 +1,7 @@
 import { getFirebaseMessaging } from '../../../config/firebase.js';
 import { Driver } from '../driver/models/Driver.js';
 import { User } from '../user/models/User.js';
+import { Dhaba } from '../bus/models/Dhaba.js';
 import { listEntityPushTokens } from './pushTokenService.js';
 
 const INVALID_TOKEN_CODES = new Set([
@@ -19,7 +20,7 @@ const chunk = (items, size) => {
   return groups;
 };
 
-const collectAudienceTargets = async ({ sendTo, serviceLocationId }) => {
+const collectAudienceTargets = async ({ sendTo, serviceLocationId, vehicleTypeIds = [] }) => {
   const includeUsers = sendTo === 'all' || sendTo === 'users';
   const includeDrivers = sendTo === 'all' || sendTo === 'drivers';
   const targets = [];
@@ -54,6 +55,14 @@ const collectAudienceTargets = async ({ sendTo, serviceLocationId }) => {
       driverQuery.service_location_id = serviceLocationId;
     }
 
+    // A driver can be enrolled in several vehicle types; match any of them.
+    if (vehicleTypeIds.length) {
+      driverQuery.$or = [
+        { vehicleTypeId: { $in: vehicleTypeIds } },
+        { vehicleTypeIds: { $in: vehicleTypeIds } },
+      ];
+    }
+
     const drivers = await Driver.find(driverQuery)
       .select('_id fcmTokenWeb fcmTokenMobile')
       .lean();
@@ -69,6 +78,24 @@ const collectAudienceTargets = async ({ sendTo, serviceLocationId }) => {
   }
 
   return targets;
+};
+
+const collectDhabaTargets = async (dhabaIds = []) => {
+  const normalizedIds = [...new Set(dhabaIds.map((id) => String(id || '').trim()).filter(Boolean))];
+  if (!normalizedIds.length) {
+    return [];
+  }
+
+  const dhabas = await Dhaba.find({ _id: { $in: normalizedIds } })
+    .select('_id fcmTokenWeb fcmTokenMobile')
+    .lean();
+
+  return dhabas.flatMap((dhaba) =>
+    listEntityPushTokens(dhaba, 'dhaba').map((tokenEntry) => ({
+      ...tokenEntry,
+      entityId: String(dhaba._id),
+    })),
+  );
 };
 
 const removeInvalidTokens = async (invalidTargets = []) => {
@@ -123,6 +150,7 @@ const sendPushToTargets = async ({
   body,
   image = '',
   data = {},
+  dataOnly = false,
 }) => {
   const messaging = getFirebaseMessaging();
 
@@ -160,29 +188,62 @@ const sendPushToTargets = async ({
   );
 
   for (const batch of chunk(dedupedTargets, 500)) {
-    const response = await messaging.sendEachForMulticast({
-      tokens: batch.map((target) => target.token),
-      notification: {
-        title,
-        body,
-        ...(image ? { imageUrl: image } : {}),
-      },
-      data: {
-        ...safeData,
-        click_action: 'FLUTTER_NOTIFICATION_CLICK',
-      },
-      android: {
-        priority: 'high',
-        notification: image ? { imageUrl: image } : undefined,
-      },
-      webpush: {
-        notification: {
-          title,
-          body,
-          ...(image ? { image } : {}),
-        },
-      },
-    });
+    // Data-only when the app must handle the push itself.
+    //
+    // On Android a message carrying a `notification` block is drawn straight
+    // into the system tray by the Firebase SDK whenever the app is backgrounded
+    // or killed, and `onMessageReceived` is never called. For an ordinary
+    // notification that is exactly what we want. For a ride offer it is fatal:
+    // the driver sees a dead tray line, the native full-screen card never
+    // posts, and Dart never learns an offer exists.
+    //
+    // Stripping the block puts the message back on the data path, which always
+    // wakes the app. The title and body ride along inside `data` so whatever
+    // renders the alert still has them.
+    const payload = dataOnly
+      ? {
+          tokens: batch.map((target) => target.token),
+          data: {
+            ...safeData,
+            title: String(title ?? ''),
+            body: String(body ?? ''),
+            click_action: 'FLUTTER_NOTIFICATION_CLICK',
+          },
+          android: {
+            priority: 'high',
+          },
+          apns: {
+            // iOS drops a data-only push unless it is flagged as a silent
+            // content update.
+            payload: { aps: { 'content-available': 1 } },
+            headers: { 'apns-priority': '5', 'apns-push-type': 'background' },
+          },
+        }
+      : {
+          tokens: batch.map((target) => target.token),
+          notification: {
+            title,
+            body,
+            ...(image ? { imageUrl: image } : {}),
+          },
+          data: {
+            ...safeData,
+            click_action: 'FLUTTER_NOTIFICATION_CLICK',
+          },
+          android: {
+            priority: 'high',
+            notification: image ? { imageUrl: image } : undefined,
+          },
+          webpush: {
+            notification: {
+              title,
+              body,
+              ...(image ? { image } : {}),
+            },
+          },
+        };
+
+    const response = await messaging.sendEachForMulticast(payload);
 
     response.responses.forEach((item, index) => {
       if (item.success) {
@@ -247,13 +308,37 @@ const collectDirectTargets = async ({ userIds = [], driverIds = [] }) => {
   return targets;
 };
 
+/// How many people and devices an admin push would reach, before sending it.
+export const countPushAudience = async ({ sendTo, serviceLocationId, vehicleTypeIds = [] }) => {
+  const targets = await collectAudienceTargets({ sendTo, serviceLocationId, vehicleTypeIds });
+  return {
+    people: new Set(targets.map((target) => target.entityId)).size,
+    devices: new Set(targets.map((target) => target.token)).size,
+  };
+};
+
+/// The data an admin push carries. The apps read the voice fields; FCM data
+/// values must all be strings.
+export const buildBroadcastData = ({ notificationId, serviceLocationId, sendTo, voice = null }) => ({
+  type: 'admin_broadcast',
+  notificationId: String(notificationId || ''),
+  serviceLocationId: String(serviceLocationId || ''),
+  sendTo: String(sendTo || 'all'),
+  voice_enabled: voice?.enabled ? '1' : '0',
+  voice_text: voice?.enabled ? String(voice.text || '') : '',
+  voice_language: voice?.enabled ? String(voice.language || 'en') : '',
+  click_action: 'FLUTTER_NOTIFICATION_CLICK',
+});
+
 export const sendPushNotificationToAudience = async ({
   notificationId,
   serviceLocationId,
   sendTo,
+  vehicleTypeIds = [],
   title,
   body,
   image,
+  voice = null,
 }) => {
   const messaging = getFirebaseMessaging();
 
@@ -268,7 +353,7 @@ export const sendPushNotificationToAudience = async ({
     };
   }
 
-  const targets = await collectAudienceTargets({ sendTo, serviceLocationId });
+  const targets = await collectAudienceTargets({ sendTo, serviceLocationId, vehicleTypeIds });
   const dedupedTargets = Array.from(
     new Map(targets.map((target) => [target.token, target])).values(),
   );
@@ -296,12 +381,7 @@ export const sendPushNotificationToAudience = async ({
         body,
         ...(image ? { imageUrl: image } : {}),
       },
-      data: {
-        notificationId: String(notificationId || ''),
-        serviceLocationId: String(serviceLocationId || ''),
-        sendTo: String(sendTo || 'all'),
-        click_action: 'FLUTTER_NOTIFICATION_CLICK',
-      },
+      data: buildBroadcastData({ notificationId, serviceLocationId, sendTo, voice }),
       android: {
         priority: 'high',
         notification: image ? { imageUrl: image } : undefined,
@@ -343,17 +423,25 @@ export const sendPushNotificationToAudience = async ({
 export const sendPushNotificationToEntities = async ({
   userIds = [],
   driverIds = [],
+  dhabaIds = [],
   title,
   body,
   image = '',
   data = {},
+  /// Set for pushes the app has to act on rather than merely display — see the
+  /// note in `sendPushToTargets`.
+  dataOnly = false,
 }) => {
-  const targets = await collectDirectTargets({ userIds, driverIds });
+  const targets = [
+    ...await collectDirectTargets({ userIds, driverIds }),
+    ...await collectDhabaTargets(dhabaIds),
+  ];
   return sendPushToTargets({
     targets,
     title,
     body,
     image,
     data,
+    dataOnly,
   });
 };

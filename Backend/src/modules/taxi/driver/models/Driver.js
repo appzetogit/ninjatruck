@@ -135,6 +135,16 @@ const driverSchema = new mongoose.Schema(
       ref: 'TaxiVehicle',
       default: null,
     },
+    // Every vehicle category this driver is enrolled to receive requests
+    // for — a driver can pick more than one at onboarding (e.g. both
+    // ZI Cab AC and ZI Cab Non-AC on the same car). `vehicleTypeId` above
+    // is kept in sync as the first entry so every existing single-value
+    // read (marker art, profile display, dispatch's driver-card fields)
+    // keeps working unchanged.
+    vehicleTypeIds: {
+      type: [{ type: mongoose.Schema.Types.ObjectId, ref: 'TaxiVehicle' }],
+      default: [],
+    },
     vehicleIconType: {
       type: String,
       default: 'car',
@@ -213,6 +223,21 @@ const driverSchema = new mongoose.Schema(
       min: 0,
     },
     referralRewardGrantedAt: {
+      type: Date,
+      default: null,
+    },
+    // Set the moment the joining bonus is credited, and never cleared. This is
+    // the idempotency key: a driver can be un-approved and re-approved, or two
+    // admins can approve at once across instances, and the bonus is still paid
+    // exactly once. Mirrors referralRewardGrantedAt above.
+    joiningBonusGrantedAt: {
+      type: Date,
+      default: null,
+    },
+    // Set the moment a free-trial pass is given and never cleared, so a
+    // driver gets one trial ever, however often they are approved or open
+    // the app. Same idea as joiningBonusGrantedAt.
+    freeTrialGrantedAt: {
       type: Date,
       default: null,
     },
@@ -417,6 +442,14 @@ const driverSchema = new mongoose.Schema(
       ref: 'TaxiZone',
       default: null,
     },
+    // Compass bearing of travel, 0 = north, clockwise. Kept on the driver
+    // as well as the ride so the admin map can orient a marker for a driver
+    // who is online but not currently on a trip.
+    heading: {
+      type: Number,
+      default: null,
+    },
+
     location: {
       type: {
         type: String,
@@ -428,6 +461,14 @@ const driverSchema = new mongoose.Schema(
         required: true,
         default: [0, 0],
       },
+    },
+    // When `location` was last written from the driver's phone. Matching only
+    // trusts a fresh fix: a driver whose app was killed stays "online" with the
+    // last point it sent, and was offered rides from wherever they had been.
+    locationUpdatedAt: {
+      type: Date,
+      default: null,
+      index: true,
     },
     routeBooking: {
       enabled: {

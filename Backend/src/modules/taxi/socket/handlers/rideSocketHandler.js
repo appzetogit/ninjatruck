@@ -1,6 +1,8 @@
-import { normalizePoint } from '../../../../utils/geo.js';
+import { normalizePoint, toPoint } from '../../../../utils/geo.js';
+import { runRedisCommand } from '../../../../infrastructure/redis/redisClient.js';
 import { RIDE_LIVE_STATUS } from '../../constants/index.js';
 import { getDriverRoom } from '../../services/dispatchService.js';
+import { DriverLocationHistory } from '../../driver/models/DriverLocationHistory.js';
 import {
   appendRideMessage,
   getActiveRideForIdentity,
@@ -17,6 +19,34 @@ import {
 import { authorizeRideRoomAccess } from '../middleware/rideRoomAuth.js';
 import { SOCKET_EVENTS } from '../events.js';
 import { clearDriverRoute, updateDriverRoute } from '../services/driverRouteService.js';
+import { consumeScopedRateLimit } from '../../middlewares/rateLimitMiddleware.js';
+
+// Same fast-read cache key the ambient (not-on-a-ride) location handler
+// writes in socket/index.js, so a REST read of "where is this driver" works
+// the same way regardless of whether they're mid-trip.
+const DRIVER_LOCATION_CACHE_TTL_SECONDS = 120;
+const cacheDriverLocation = (driverId, payload) => {
+  runRedisCommand(
+    (client) =>
+      client.set(`driver:${driverId}:location`, JSON.stringify(payload), {
+        EX: DRIVER_LOCATION_CACHE_TTL_SECONDS,
+      }),
+    { label: 'cache driver location' },
+  );
+};
+
+// Headroom over what a driver app on an 8m filter produces at speed, so an
+// honest burst - leaving a tunnel, regaining lock - is not silently discarded.
+// At 30 a three-metre filter went past the limit at ordinary city speed and
+// the surplus was dropped on arrival, which is what gave the rider ragged
+// spacing between fixes and a marker that sped up and slowed down.
+const RIDE_LOCATION_RATE_LIMIT_MAX = 60;
+const RIDE_LOCATION_RATE_LIMIT_WINDOW_MS = 10_000;
+
+/// Past this a fix describes the sky rather than the road. Forwarding one puts
+/// a car through a building on the rider's map, and neither app can tell it
+/// from a real fix once it has arrived.
+const RIDE_LOCATION_MAX_ACCURACY_METERS = 60;
 
 const driverLifecycleStatuses = new Set([
   RIDE_LIVE_STATUS.ACCEPTED,
@@ -87,7 +117,25 @@ export const registerRideSocketHandlers = ({ io, socket, onAsync }) => {
         setImmediate(() => {
           mirrorRideRealtimeState(payload).catch(() => {});
         });
+        return;
       }
+
+      // This ride is not (or no longer) the caller's active ride — most often
+      // because it was cancelled or completed while this socket was
+      // disconnected. The room broadcast that would normally announce that is
+      // long gone by the time a new connection re-joins, so without this the
+      // rejoining side (typically a driver whose transport dropped mid-trip)
+      // is left showing a ride that is already over with nothing to correct
+      // it. Sending this ride's own current state lets the existing
+      // `ride:state` handler resolve it the same way a live cancellation or
+      // completion does.
+      //
+      // Re-fetched fully rather than reusing `ride`: authorizeRideRoomAccess
+      // only selects the fields it needs for the access check, and
+      // serializeRideRealtime needs the rest (addresses, fare, populated
+      // rider/delivery) to produce a payload the client can actually parse.
+      const fullRide = await getRideDetails(ride._id);
+      socket.emit(SOCKET_EVENTS.RIDE_STATE, serializeRideRealtime(fullRide));
     }),
   );
 
@@ -121,9 +169,20 @@ export const registerRideSocketHandlers = ({ io, socket, onAsync }) => {
 
   socket.on(
     SOCKET_EVENTS.RIDE_DRIVER_LOCATION_UPDATE,
-    onAsync(socket, async ({ rideId, coordinates, heading, speed }) => {
+    onAsync(socket, async ({ rideId, coordinates, heading, speed, accuracy, timestamp, sequence }) => {
       if (socket.auth.role !== 'driver') {
         throw new Error('Only drivers can update live ride location');
+      }
+
+      const rateLimitOutcome = await consumeScopedRateLimit({
+        scope: 'ride_driver_location_socket',
+        max: RIDE_LOCATION_RATE_LIMIT_MAX,
+        windowMs: RIDE_LOCATION_RATE_LIMIT_WINDOW_MS,
+        mode: 'custom',
+        parts: [socket.auth.sub],
+      });
+      if (!rateLimitOutcome.allowed) {
+        return;
       }
 
       await authorizeRideRoomAccess({ socket, rideId });
@@ -131,6 +190,28 @@ export const registerRideSocketHandlers = ({ io, socket, onAsync }) => {
       const persistKey = `${rideId}:${socket.auth.sub}`;
       const now = Date.now();
       const previousPersistState = rideLocationPersistState.get(persistKey) || {};
+
+      // Passing sequence through lets the rider *reject* a late packet; acting
+      // on it here means the late packet is never sent to anyone in the first
+      // place - including the driver's own second device, the admin map, and
+      // the location history the analytics read.
+      const incomingSequence = Number.isFinite(Number(sequence)) ? Number(sequence) : null;
+      const lastSequence = Number(previousPersistState.sequence);
+      if (incomingSequence !== null && Number.isFinite(lastSequence) && incomingSequence <= lastSequence) {
+        return;
+      }
+
+      // Only once there is an earlier fix worth keeping instead: the first of a
+      // trip goes through however vague it is, or the rider watches an empty
+      // map until the phone gets a clean lock.
+      const incomingAccuracy = Number.isFinite(Number(accuracy)) ? Number(accuracy) : null;
+      if (
+        incomingAccuracy !== null &&
+        incomingAccuracy > RIDE_LOCATION_MAX_ACCURACY_METERS &&
+        Array.isArray(previousPersistState.coordinates)
+      ) {
+        return;
+      }
       const distanceFromPrevious = Array.isArray(previousPersistState.coordinates)
         ? getDistanceMeters(previousPersistState.coordinates, normalizedCoordinates)
         : Number.POSITIVE_INFINITY;
@@ -154,7 +235,30 @@ export const registerRideSocketHandlers = ({ io, socket, onAsync }) => {
           })
         : fallbackLocationUpdate;
 
-      io.to(getRideRoom(rideId)).emit(SOCKET_EVENTS.RIDE_DRIVER_LOCATION_UPDATED, locationUpdate);
+      // Passthrough only, not persisted — this is what lets the rider app
+      // reject a delayed/out-of-order packet (sequence/timestamp) and avoid
+      // treating a poor-accuracy fix as grounds for a reroute. An older
+      // driver build simply won't send these, and the rider already treats
+      // every one of them as optional.
+      const normalizedAccuracy = Number.isFinite(Number(accuracy)) ? Number(accuracy) : null;
+      const normalizedTimestamp = Number.isFinite(Number(timestamp)) ? Number(timestamp) : null;
+      const normalizedSequence = Number.isFinite(Number(sequence)) ? Number(sequence) : null;
+      const broadcastPayload = {
+        ...locationUpdate,
+        ...(normalizedAccuracy !== null ? { accuracy: normalizedAccuracy } : {}),
+        ...(normalizedTimestamp !== null ? { timestamp: normalizedTimestamp } : {}),
+        ...(normalizedSequence !== null ? { sequence: normalizedSequence } : {}),
+      };
+
+      io.to(getRideRoom(rideId)).emit(SOCKET_EVENTS.RIDE_DRIVER_LOCATION_UPDATED, broadcastPayload);
+      // Fast-read cache, written every tick regardless of the persist
+      // throttle above — a REST read should see the true latest fix.
+      cacheDriverLocation(socket.auth.sub, {
+        coordinates: normalizedCoordinates,
+        heading: locationUpdate.heading,
+        speed: locationUpdate.speed,
+        updatedAt: now,
+      });
       if (shouldPersistLocation) {
         setImmediate(() => {
           mirrorRideDriverLocation({
@@ -164,15 +268,29 @@ export const registerRideSocketHandlers = ({ io, socket, onAsync }) => {
             speed: locationUpdate.speed,
           }).catch(() => {});
         });
+        // Analytics only — never let this hold up the live-tracking path.
+        DriverLocationHistory.create({
+          driverId: socket.auth.sub,
+          rideId,
+          location: toPoint(normalizedCoordinates, 'coordinates'),
+          heading: locationUpdate.heading,
+          speed: locationUpdate.speed,
+        }).catch((error) => {
+          console.error('Failed to persist ride driver location history', error.message);
+        });
       }
 
       rideLocationPersistState.set(persistKey, {
         coordinates: normalizedCoordinates,
         persistedAt: shouldPersistLocation ? now : Number(previousPersistState.persistedAt || 0),
+        sequence: incomingSequence ?? previousPersistState.sequence ?? null,
       });
 
+      // Keeps the Firebase breadcrumb trail, which is throttled to one write
+      // per ten seconds inside, without the socket fan-out it used to do on
+      // every tick: `ride:driver-route:updated` carried the whole accumulated
+      // point array to a room where neither app has ever had a handler for it.
       updateDriverRoute({
-        io,
         rideId,
         driverId: socket.auth.sub,
         coordinates: normalizedCoordinates,
@@ -182,7 +300,7 @@ export const registerRideSocketHandlers = ({ io, socket, onAsync }) => {
 
   socket.on(
     SOCKET_EVENTS.RIDE_STATUS_UPDATE,
-    onAsync(socket, async ({ rideId, status, paymentMethod }) => {
+    onAsync(socket, async ({ rideId, status, paymentMethod, collectedVia }) => {
       if (socket.auth.role !== 'driver') {
         throw new Error('Only drivers can update ride status');
       }
@@ -198,6 +316,7 @@ export const registerRideSocketHandlers = ({ io, socket, onAsync }) => {
         driverId: socket.auth.sub,
         nextStatus: status,
         paymentMethod,
+        collectedVia,
       });
       const populatedRide = await getRideDetails(rideId);
 
@@ -230,7 +349,7 @@ export const registerRideSocketHandlers = ({ io, socket, onAsync }) => {
 
   socket.on(
     SOCKET_EVENTS.RIDE_MESSAGE_SEND,
-    onAsync(socket, async ({ rideId, message }) => {
+    onAsync(socket, async ({ rideId, message, imageUrl }) => {
       await authorizeRideRoomAccess({ socket, rideId });
 
       const savedMessage = await appendRideMessage({
@@ -238,6 +357,7 @@ export const registerRideSocketHandlers = ({ io, socket, onAsync }) => {
         role: socket.auth.role,
         senderId: socket.auth.sub,
         message,
+        imageUrl,
       });
 
       io.to(getRideRoom(rideId)).emit(SOCKET_EVENTS.RIDE_MESSAGE_NEW, savedMessage);

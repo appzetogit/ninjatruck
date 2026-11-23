@@ -10,6 +10,8 @@ import { Driver } from '../driver/models/Driver.js';
 import { WalletTransaction } from '../driver/models/WalletTransaction.js';
 import { incrementDriverTodaySummaryForCompletedRide } from '../driver/services/driverTodaySummaryService.js';
 import { applyDriverWalletAdjustment, ensureDriverWalletCanAcceptRide, settleCompletedRideWallet } from '../driver/services/walletService.js';
+import { sendRideInvoiceEmail } from './invoiceService.js';
+import { sendPushNotificationToEntities } from './pushNotificationService.js';
 import { Delivery } from '../user/models/Delivery.js';
 import { RideBid } from '../user/models/RideBid.js';
 import { Ride } from '../user/models/Ride.js';
@@ -17,8 +19,16 @@ import { User } from '../user/models/User.js';
 import { UserWallet } from '../user/models/UserWallet.js';
 import { consumeUserSubscriptionRide, resolveApplicableUserSubscription } from '../user/services/subscriptionService.js';
 import { applyPromoToRideInTransaction } from './promoService.js';
+import { consumeRideCashbackRedemption, resolveCashbackForBooking } from '../rewards/services/cashbackRedemptionService.js';
+import { processRideCashback } from '../rewards/services/rewardService.js';
+import { ABSOLUTE_MAX_MULTIPLIER, getSurgeAt, getSurgeProfiles, surgeForVehicle } from './surgeService.js';
+import { estimateTolls, isRoundTripValue } from './tollService.js';
+import { classifyTrip } from './tripCategoryService.js';
 import { getTipSettings } from './appSettingsService.js';
 import { getBidRideSettings } from './transportSettingsService.js';
+import { resolveBiddingPolicy } from './biddingPolicyService.js';
+import { resolveRideRoute } from './routeService.js';
+import { normalizeStops, resolveBookingFare } from './rideFareService.js';
 
 const clearUserActiveRideIfPresent = async (user) => {
   if (!user?.currentRideId) {
@@ -347,8 +357,48 @@ const processCompletedDriverReferralReward = async (ride) => {
 
 const normalizeAddress = (value = '') => String(value || '').trim();
 const generateRideOtp = () => String(Math.floor(1000 + Math.random() * 9000));
+
+/// The rider's ride OTP: the same four digits for every trip they take.
+///
+/// Kept on the account and resolved once. A rider who already has rides keeps
+/// the code from their most recent one, so a code a driver has already been
+/// given does not change underneath them.
+const resolveRiderOtp = async (user) => {
+  if (/^\d{4}$/.test(String(user.rideOtp || ''))) {
+    return String(user.rideOtp);
+  }
+
+  const previous = await Ride.findOne({ userId: user._id, otp: /^\d{4}$/ })
+    .sort({ createdAt: -1 })
+    .select('otp')
+    .lean();
+
+  const otp = previous?.otp || generateRideOtp();
+  user.rideOtp = otp;
+  await User.updateOne({ _id: user._id }, { $set: { rideOtp: otp } });
+  return otp;
+};
 const DEFAULT_BID_STEP_AMOUNT = 10;
 const DEFAULT_MAX_BID_STEPS = 5;
+
+/// Sender photos: at most two, each a plain URL. Anything else is dropped
+/// rather than stored, so a malformed client cannot push arbitrary payloads
+/// into the ride document.
+const normalizeParcelPhotos = (value) => {
+  if (!Array.isArray(value)) return [];
+
+  return value
+    .map((entry) => String(entry || '').trim())
+    .filter((entry) => entry.length > 0 && entry.length <= 2048)
+    .slice(0, 2);
+};
+
+/// Carries a stored proof forward unchanged. Only ever reads what the driver
+/// endpoint already wrote - never rider input.
+const normalizeParcelProof = (proof = {}) => ({
+  url: String(proof?.url || '').trim(),
+  at: proof?.at || null,
+});
 
 const normalizeParcelPayload = (parcel = {}) => ({
   category: String(parcel.category || '').trim(),
@@ -364,6 +414,8 @@ const normalizeParcelPayload = (parcel = {}) => ({
   senderMobile: String(parcel.senderMobile || '').trim(),
   receiverName: String(parcel.receiverName || '').trim(),
   receiverMobile: String(parcel.receiverMobile || '').trim(),
+  photos: normalizeParcelPhotos(parcel.photos),
+  instructions: String(parcel.instructions || parcel.specialInstructions || '').trim().slice(0, 500),
 });
 
 const normalizeIntercityPayload = (intercity = {}) => ({
@@ -372,6 +424,10 @@ const normalizeIntercityPayload = (intercity = {}) => ({
   toCity: String(intercity.toCity || '').trim(),
   tripType: String(intercity.tripType || '').trim(),
   travelDate: String(intercity.travelDate || intercity.date || '').trim(),
+  // When the rider wants to be driven back. Only meaningful for a round trip;
+  // one-way bookings leave it blank. Stored as the client's ISO string so the
+  // driver app can show "returning on ..." without a second schema shape.
+  returnDate: String(intercity.returnDate || intercity.returnAt || '').trim(),
   passengers: Math.max(Number(intercity.passengers || 1), 1),
   distance: Math.max(Number(intercity.distance || 0), 0),
   vehicleName: String(intercity.vehicleName || '').trim(),
@@ -811,6 +867,46 @@ const normalizeRideTransportType = (value = 'taxi') => {
   return normalized;
 };
 
+/// Why this driver was refused, in words a driver can act on.
+///
+/// The five conditions on the accept filter all produced the same sentence,
+/// which meant a driver seeing it - and whoever they called about it - could
+/// not tell "you are offline" from "this ride is not for your vehicle". Read
+/// only when a refusal has already happened, so it costs nothing in the normal
+/// path.
+const explainWhyDriverCannotAccept = async ({ driverId, ride }) => {
+  const driver = await Driver.findById(driverId)
+    .select('isOnline isOnRide wallet.isBlocked owner_id vehicleTypeId vehicleTypeIds')
+    .lean();
+
+  if (!driver) {
+    return 'Driver account not found';
+  }
+
+  if (!driver.isOnline) {
+    return 'You are offline. Go online to accept rides';
+  }
+
+  if (driver.isOnRide) {
+    return 'You are already on a ride. Finish it before accepting another';
+  }
+
+  if (driver.wallet?.isBlocked && !driver.owner_id) {
+    return 'Your wallet is blocked. Clear the balance to accept rides';
+  }
+
+  const wanted = normalizeVehicleTypeIds(ride.dispatchVehicleTypeIds || [], ride.vehicleTypeId)
+    .map(String);
+  const mine = [driver.vehicleTypeId, ...(driver.vehicleTypeIds || [])]
+    .filter(Boolean)
+    .map(String);
+  if (wanted.length && !mine.some((id) => wanted.includes(id))) {
+    return 'This ride is for a different vehicle type than yours';
+  }
+
+  return 'Driver is unavailable to accept this ride';
+};
+
 const buildDriverVehicleAcceptFilter = async (ride) => {
   const vehicleTypeIds = normalizeVehicleTypeIds(ride.dispatchVehicleTypeIds || [], ride.vehicleTypeId);
 
@@ -835,7 +931,83 @@ const buildDriverVehicleAcceptFilter = async (ride) => {
     return clauses.length > 1 ? { $or: clauses } : clauses[0] || {};
   }
 
-  return { vehicleTypeId: { $in: vehicleTypeIds } };
+  // Both fields, because dispatch matches on both. A driver who enrolled in
+  // more than one category at onboarding keeps the extras in vehicleTypeIds
+  // and only the first in vehicleTypeId - so checking the singular alone
+  // offered them rides they were then told they could not accept.
+  return {
+    $or: [
+      { vehicleTypeId: { $in: vehicleTypeIds } },
+      { vehicleTypeIds: { $in: vehicleTypeIds } },
+    ],
+  };
+};
+
+/// Waiting charge for a parcel, applied once when the trip completes.
+///
+/// `arrivedAt` is stamped when the driver reaches the pickup and `startedAt`
+/// when the parcel is collected, so the gap between them is the time the driver
+/// spent waiting for the sender. The free window and per-minute rate come from
+/// the delivery tariff the fare was priced on, locked onto the ride at booking
+/// so they follow the pickup zone just as the fare does.
+///
+/// Only whole elapsed minutes are charged, so a part-minute is never rounded up
+/// against the customer. The cap is a safety net: if a driver marks the pickup
+/// and forgets to start the trip, this bounds the damage rather than billing
+/// them for the rest of the day.
+const PARCEL_WAITING_CHARGE_CAP_MINUTES = 60;
+
+/// Taxi and outstation rides are charged the same way, on the waiting terms of
+/// the tariff row their fare was priced on (Set Prices: waiting charge per
+/// minute, free waiting before the trip starts). They were stored on every
+/// ride and never charged.
+const applyParcelWaitingCharge = async (ride) => {
+  if (!ride) return;
+  const isParcel = (ride.serviceType || 'ride') === 'parcel';
+  if (!isParcel && !ride.pricingSnapshot?.setPriceId) return;
+  // A pass-covered ride was paid in full at booking; nothing more to collect.
+  if (ride.subscriptionUsage?.covered) return;
+  // Already paid online mid-trip: adding to the fare now would leave a
+  // balance nobody collects.
+  if (!isParcel && ride.driverPaymentCollection?.status === 'paid') return;
+  if (!ride.arrivedAt || !ride.startedAt) return;
+  if (Number(ride.waitingCharge) > 0) return; // already applied
+
+  const elapsedMs = new Date(ride.startedAt).getTime() - new Date(ride.arrivedAt).getTime();
+  if (!Number.isFinite(elapsedMs) || elapsedMs <= 0) return;
+
+  let perMinute;
+  let freeMinutes;
+
+  if (!isParcel || ride.pricingSnapshot?.delivery_tariff_source) {
+    perMinute = Math.max(0, Number(ride.pricingSnapshot.waiting_charge) || 0);
+    freeMinutes = Math.max(0, Number(ride.pricingSnapshot.free_waiting_before) || 0);
+  } else {
+    // Booked before the terms were locked onto the ride: read the vehicle, as
+    // this always did.
+    const vehicle = ride.vehicleTypeId
+      ? await Vehicle.findById(ride.vehicleTypeId).select('delivery_distance_pricing').lean()
+      : null;
+    const pricing = vehicle?.delivery_distance_pricing || {};
+    perMinute = Math.max(0, Number(pricing.time_price) || 0);
+    freeMinutes = Math.max(0, Number(pricing.free_time) || 0);
+  }
+
+  if (perMinute <= 0) return;
+  const waitedMinutes = Math.floor(elapsedMs / 60000);
+  const chargeableMinutes = Math.min(
+    Math.max(0, waitedMinutes - freeMinutes),
+    PARCEL_WAITING_CHARGE_CAP_MINUTES,
+  );
+  if (chargeableMinutes <= 0) return;
+
+  const charge = Math.round(chargeableMinutes * perMinute * 100) / 100;
+
+  ride.waitingMinutes = chargeableMinutes;
+  ride.waitingCharge = charge;
+  // Added before the ride is saved, because the wallet settlement that follows
+  // completion reads ride.fare.
+  ride.fare = Math.round((Number(ride.fare || 0) + charge) * 100) / 100;
 };
 
 const syncDeliveryWithRide = async (ride) => {
@@ -857,8 +1029,14 @@ const syncDeliveryWithRide = async (ride) => {
     dropLocation: ride.dropLocation,
     dropAddress: normalizeAddress(ride.dropAddress),
     fare: ride.fare,
+    waitingMinutes: ride.waitingMinutes || 0,
+    waitingCharge: ride.waitingCharge || 0,
     paymentMethod: ride.paymentMethod,
-    parcel: normalizeParcelPayload(ride.parcel),
+    parcel: {
+      ...normalizeParcelPayload(ride.parcel),
+      pickupProof: normalizeParcelProof(ride.parcel?.pickupProof),
+      deliveryProof: normalizeParcelProof(ride.parcel?.deliveryProof),
+    },
     acceptedAt: ride.acceptedAt || null,
     startedAt: ride.startedAt || null,
     completedAt: ride.completedAt || null,
@@ -872,6 +1050,76 @@ const syncDeliveryWithRide = async (ride) => {
   ride.deliveryId = delivery._id;
   await ride.save();
   return delivery;
+};
+
+/// Zone and service location a pickup sits in, or nulls outside every zone.
+/// Imported lazily: matchingService already imports this module.
+export const resolveZoneForPickup = async (pickupCoords) => {
+  try {
+    const { findZoneByPickup } = await import('./matchingService.js');
+    const zone = await findZoneByPickup(pickupCoords);
+    const serviceLocationId = zone?.service_location_id?._id || zone?.service_location_id;
+    return {
+      zoneId: zone?._id ? String(zone._id) : null,
+      serviceLocationId: serviceLocationId ? String(serviceLocationId) : null,
+    };
+  } catch {
+    return { zoneId: null, serviceLocationId: null };
+  }
+};
+
+/// Service location of the zone a pickup sits in, or null outside every zone.
+export const resolveServiceLocationIdForPickup = async (pickupCoords) =>
+  (await resolveZoneForPickup(pickupCoords)).serviceLocationId;
+
+/** The tolls on an outstation ride, in the shape the apps read. */
+export const serializeTollCharges = (tolls) =>
+  tolls && Number(tolls.total) > 0
+    ? {
+        total: Number(tolls.total),
+        roundTrip: Boolean(tolls.roundTrip),
+        items: (tolls.items || []).map((item) => ({
+          name: item.name || '',
+          highway: item.highway || '',
+          oneWay: Number(item.oneWay || 0),
+          returnTrip: Number(item.returnTrip || 0),
+          amount: Number(item.amount || 0),
+        })),
+      }
+    : null;
+
+/// Tolls for an outstation ride, or null (not outstation, no route, no tolls).
+const resolveRideTolls = async ({ serviceType, pickupCoords, dropCoords, vehicleTypeId, intercity }) => {
+  if (normalizeServiceType(serviceType) !== 'intercity' || !vehicleTypeId) return null;
+  try {
+    const roundTrip = isRoundTripValue(intercity?.tripType);
+    const { byVehicle } = await estimateTolls({
+      origin: pickupCoords,
+      destination: dropCoords,
+      vehicleTypeIds: [String(vehicleTypeId)],
+      roundTrip,
+    });
+    const tolls = byVehicle[String(vehicleTypeId)];
+    if (!tolls || !(tolls.total > 0)) return null;
+    return {
+      total: tolls.total,
+      roundTrip,
+      items: tolls.items
+        .filter((item) => item.amount > 0)
+        .map((item) => ({
+          plazaId: item.plaza_id,
+          name: item.name,
+          highway: item.highway,
+          oneWay: item.one_way,
+          returnTrip: item.return_trip,
+          amount: item.amount,
+        })),
+    };
+  } catch (error) {
+    // Tolls must never stop a booking; the trip is quoted without them.
+    console.error('[tolls] not resolved for ride', error?.message);
+    return null;
+  }
 };
 
 export const createRideRecord = async ({
@@ -899,6 +1147,12 @@ export const createRideRecord = async ({
   bookingMode,
   userMaxBidFare,
   bidStepAmount,
+  platformFee,
+  surgeMultiplier,
+  tollAmount,
+  useCashback = true,
+  quoteToken,
+  stops,
 }) => {
   const user = await User.findById(userId);
 
@@ -908,13 +1162,11 @@ export const createRideRecord = async ({
 
   await clearUserActiveRideIfPresent(user);
 
-  const safeFare = Number(fare);
+  const riderOtp = await resolveRiderOtp(user);
+
+  const quotedFare = Number(fare);
   const safeEstimatedDistanceMeters = Math.max(0, Number(estimatedDistanceMeters || 0));
   const safeEstimatedDurationMinutes = Math.max(0, Number(estimatedDurationMinutes || 0));
-
-  if (!Number.isFinite(safeFare) || safeFare < 0) {
-    throw new ApiError(400, 'fare must be a positive number or zero');
-  }
 
   const dispatchVehicleTypeIds = normalizeVehicleTypeIds(vehicleTypeIds, vehicleTypeId);
 
@@ -923,53 +1175,137 @@ export const createRideRecord = async ({
   }
 
   const primaryVehicleTypeId = dispatchVehicleTypeIds[0] || null;
+  const bookingServiceType = normalizeServiceType(serviceType);
+  const stopCoords = normalizeStops(stops);
+
+  // The fare is the server's, never the phone's. Taxi and outstation trips are
+  // priced here (or at the locked quote the app got from /rides/quote) from the
+  // pickup zone's tariff over the road route, with surge, tolls and airport
+  // fee. Parcels arrive already priced by createDeliveryRecord, the only
+  // caller that may pass a parcel. The app's `fare` used to be stored as it
+  // was, so a missing tariff or a stale app booked rides at 0.
+  const serverPriced = bookingServiceType !== 'parcel';
+  const bookingFare = serverPriced
+    ? await resolveBookingFare({
+        userId,
+        quoteToken,
+        pickupCoords,
+        dropCoords,
+        stops: stopCoords,
+        vehicleTypeId: primaryVehicleTypeId,
+        serviceType: bookingServiceType,
+        roundTrip: bookingServiceType === 'intercity' && isRoundTripValue(intercity?.tripType),
+        clientFare: quotedFare,
+      })
+    : null;
+
+  if (!serverPriced && (!Number.isFinite(quotedFare) || quotedFare <= 0)) {
+    throw new ApiError(400, 'This trip has no price yet.');
+  }
+
+  const rideTollCharges = serverPriced ? (bookingFare.tollCharges || null) : null;
+  const safeFare = serverPriced ? bookingFare.fare : Math.round(quotedFare * 100) / 100;
   const primaryVehicle = primaryVehicleTypeId
-    ? await Vehicle.findById(primaryVehicleTypeId).select('icon map_icon image dispatch_type admin_commission_type_from_driver admin_commission_from_driver admin_commission_type_for_owner admin_commission_for_owner').lean()
+    ? await Vehicle.findById(primaryVehicleTypeId).select('name icon_types category vehicle_type icon map_icon image dispatch_type admin_commission_type_from_driver admin_commission_from_driver admin_commission_type_for_owner admin_commission_for_owner').lean()
     : null;
   const resolvedVehicleIconUrl = String(
     vehicleIconUrl || primaryVehicle?.image || primaryVehicle?.map_icon || primaryVehicle?.icon || '',
   ).trim();
+  // Neither app sends this, so taking it only from the request left it empty on
+  // every ride and both maps fell through to the default car marker. The
+  // catalog already records the family ('bike' for a scooty, 'auto', ...).
+  const resolvedVehicleIconType = String(
+    vehicleIconType ||
+    primaryVehicle?.icon_types ||
+    primaryVehicle?.category ||
+    primaryVehicle?.vehicle_type ||
+    '',
+  ).trim();
   const normalizedTransportType = normalizeRideTransportType(transport_type);
-  const resolvedZoneId =
-    zone_id && mongoose.Types.ObjectId.isValid(zone_id)
-      ? new mongoose.Types.ObjectId(zone_id)
-      : null;
-  const resolvedServiceLocationId =
+  // The rider app sends neither id, so every ride was stored without a zone
+  // or city and priced its commission and waiting charge from a fallback
+  // tariff row instead of the pickup zone's. Taken from the pickup when absent.
+  const pickupZone =
+    (zone_id && mongoose.Types.ObjectId.isValid(zone_id)) &&
+    (service_location_id && mongoose.Types.ObjectId.isValid(service_location_id))
+      ? null
+      : await resolveZoneForPickup(pickupCoords);
+  const zoneIdInput =
+    zone_id && mongoose.Types.ObjectId.isValid(zone_id) ? zone_id : pickupZone?.zoneId;
+  const serviceLocationIdInput =
     service_location_id && mongoose.Types.ObjectId.isValid(service_location_id)
-      ? new mongoose.Types.ObjectId(service_location_id)
-      : null;
-  const { pricingRule, allowedPaymentMethods } = await getAllowedRidePaymentMethodsForPricing({
+      ? service_location_id
+      : pickupZone?.serviceLocationId;
+  const resolvedZoneId = zoneIdInput ? new mongoose.Types.ObjectId(zoneIdInput) : null;
+  const resolvedServiceLocationId = serviceLocationIdInput
+    ? new mongoose.Types.ObjectId(serviceLocationIdInput)
+    : null;
+  let { pricingRule, allowedPaymentMethods } = await getAllowedRidePaymentMethodsForPricing({
     zoneId: resolvedZoneId,
     serviceLocationId: resolvedServiceLocationId,
     transportType: normalizedTransportType,
     vehicleTypeId: primaryVehicleTypeId,
   });
+  // Commission, payment methods and waiting terms come from the very row the
+  // fare was priced on. The lookup above can land on a different row (another
+  // zone's, or none), which settled rides at 0% commission.
+  if (bookingFare?.setPriceId && String(pricingRule?._id || '') !== String(bookingFare.setPriceId)) {
+    const pricedRow = await SetPrice.findById(bookingFare.setPriceId).lean().catch(() => null);
+    if (pricedRow) {
+      pricingRule = pricedRow;
+      allowedPaymentMethods = normalizeAllowedRidePaymentMethods(pricedRow.payment_type);
+    }
+  }
   const normalizedPaymentMethod = normalizeRidePaymentMethod(paymentMethod);
   const resolvedRequestedPaymentMethod = allowedPaymentMethods.includes(normalizedPaymentMethod)
     ? normalizedPaymentMethod
     : (allowedPaymentMethods[0] || 'cash');
-  const supportsBidding = ['bidding', 'both'].includes(String(primaryVehicle?.dispatch_type || '').trim().toLowerCase());
   const requestedBookingMode = String(bookingMode || '').trim().toLowerCase();
   const normalizedServiceType = normalizeServiceType(serviceType);
   const bidRideSettings = await getBidRideSettings();
-  const fareIncreaseWaitMinutes = toPositiveNumber(
-    bidRideSettings.user_fare_increase_wait_minutes,
-    2,
-  );
-  const isOutstationBiddingFlow = normalizedServiceType === 'intercity';
-  const pricingNegotiationMode =
-    supportsBidding && requestedBookingMode === 'bidding'
-      ? isOutstationBiddingFlow
-        ? 'driver_bid'
-        : 'user_increment_only'
-      : 'none';
+  // Bidding wait window: 0 = instant (no cool-off between rider fare raises).
+  // toPositiveNumber would reject a configured 0 and fall back, so read it as a
+  // non-negative number and default to 0 (instant).
+  const rawFareIncreaseWait = Number(bidRideSettings.user_fare_increase_wait_minutes);
+  const fareIncreaseWaitMinutes =
+    Number.isFinite(rawFareIncreaseWait) && rawFareIncreaseWait >= 0 ? rawFareIncreaseWait : 0;
+  // Whether this booking may be negotiated is the admin's call, not the app's.
+  // The policy weighs the master switch, the services bidding is switched on
+  // for, whether this vehicle is marked biddable, and the distance cap - which
+  // had been sitting in the settings unread. A request the policy turns down
+  // is booked at the quoted fare rather than refused, so an app that has not
+  // caught up with the setting still books.
+  const biddingPolicy = await resolveBiddingPolicy({
+    vehicle: primaryVehicle,
+    serviceType: normalizedServiceType,
+    distanceMeters: bookingFare?.distanceMeters > 0 ? bookingFare.distanceMeters : safeEstimatedDistanceMeters,
+    bidSettings: bidRideSettings,
+  });
+  // Rapido's behaviour, and what the client asked for: a rider who is waiting
+  // and getting nobody should be offered the chance to add to their fare,
+  // whether or not they thought about bidding when they booked. Applies only
+  // to the raise-your-own-fare mode - an outstation ride hands pricing to the
+  // drivers, which is a different thing to opt into, so that still needs the
+  // rider to ask for it.
+  const offerFareRaiseWithoutOptIn =
+    biddingPolicy.allowed &&
+    biddingPolicy.mode === 'user_increment_only' &&
+    String(bidRideSettings.user_increment_always ?? '1').trim() === '1';
+  const pricingNegotiationMode = biddingPolicy.allowed
+    && (requestedBookingMode === 'bidding' || offerFareRaiseWithoutOptIn)
+    ? biddingPolicy.mode
+    : 'none';
+  // A rider who never asked for bidding must still be charged what they were
+  // quoted. Opting in starts them at the bid floor, which the admin may have
+  // set above the fare; this path starts at the fare itself and only moves if
+  // the rider chooses to raise it.
+  const startsAtQuotedFare = pricingNegotiationMode === 'user_increment_only'
+    && requestedBookingMode !== 'bidding';
   const effectiveBookingMode = pricingNegotiationMode === 'driver_bid' ? 'bidding' : 'normal';
+  // One step amount now, the rider's, because the rider is the only one who
+  // ever moves the fare. The separate driver step only applied to driver bids.
   const configuredBidStepAmount = pricingNegotiationMode !== 'none'
-    ? normalizeBidStepAmount(
-        isOutstationBiddingFlow
-          ? bidRideSettings.bidding_amount_increase_or_decrease
-          : bidRideSettings.user_bidding_amount_increase_or_decrease,
-      )
+    ? normalizeBidStepAmount(bidRideSettings.user_bidding_amount_increase_or_decrease)
     : normalizeBidStepAmount(bidStepAmount);
   const effectiveBidStepAmount = configuredBidStepAmount || normalizeBidStepAmount(bidStepAmount);
   const bidRideRange = resolveBidRideRange({
@@ -988,21 +1324,25 @@ export const createRideRecord = async ({
     : pricingNegotiationMode === 'user_increment_only'
       ? clampBidAmountWithinRange({
           amount: safeFare,
-          minFare: bidRideRange.userBidFloorFare,
-          maxFare: bidRideRange.userBidCeilingFare,
+          minFare: startsAtQuotedFare ? safeFare : bidRideRange.userBidFloorFare,
+          maxFare: Math.max(safeFare, bidRideRange.userBidCeilingFare),
           baseFare: safeFare,
           bidStepAmount: effectiveBidStepAmount,
         })
       : safeFare;
+  // The floor has to be the fare the rider is actually starting at, not the
+  // raw quote. A quote of 159.30 is charged as 159 - every bid figure is a
+  // whole number of rupees - and a floor of 159.30 would sit fractionally
+  // above the fare it is meant to be the floor of.
   const effectiveBidFloorFare = pricingNegotiationMode === 'driver_bid'
     ? bidRideRange.driverBidFloorFare
     : pricingNegotiationMode === 'user_increment_only'
-      ? bidRideRange.userBidFloorFare
+      ? (startsAtQuotedFare ? effectiveUserMaxBidFare : bidRideRange.userBidFloorFare)
       : safeFare;
   const effectiveBidCeilingMaxFare = pricingNegotiationMode === 'driver_bid'
     ? Math.min(bidRideRange.userBidCeilingFare, bidRideRange.driverBidCeilingFare)
     : pricingNegotiationMode === 'user_increment_only'
-      ? bidRideRange.userBidCeilingFare
+      ? Math.max(safeFare, bidRideRange.userBidCeilingFare)
       : safeFare;
   const effectiveStartingFare = pricingNegotiationMode === 'user_increment_only'
     ? effectiveUserMaxBidFare
@@ -1019,6 +1359,20 @@ export const createRideRecord = async ({
           admin_commission_for_owner: Number(primaryVehicle?.admin_commission_for_owner ?? 0),
         }
       : null;
+  // The per-ride fee the rider was charged on top of the trip, kept apart so
+  // settlement pays it to admin rather than the driver. Taken from what the app
+  // says it added and capped at what this tariff allows: a build that predates
+  // the fee adds none and sends none, and a driver must never pay for a fee the
+  // rider was not charged.
+  const configuredPlatformFee = Number(pricingRule?.admin_commision_type ?? 1) === 1
+    ? (safeFare * Math.max(0, Number(pricingRule?.admin_commision) || 0)) / 100
+    : Math.max(0, Number(pricingRule?.admin_commision) || 0);
+  // Server-priced rides carry the fee the fare engine put in; parcels keep the
+  // old rule (what the app says, capped at the tariff).
+  const riderPlatformFee = serverPriced
+    ? Math.round(Math.max(0, Number(bookingFare.platformFee) || 0) * 100) / 100
+    : Math.round(Math.min(Math.max(0, Number(platformFee) || 0), configuredPlatformFee) * 100) / 100;
+
   const pricingSnapshot = {
     setPriceId: pricingRule?._id || null,
     admin_commission_type_from_driver: Number(pricingRule?.admin_commission_type_from_driver ?? parcelCommissionFallback?.admin_commission_type_from_driver ?? 1),
@@ -1029,7 +1383,48 @@ export const createRideRecord = async ({
     free_waiting_before: Number(pricingRule?.free_waiting_before ?? 0),
     free_waiting_after: Number(pricingRule?.free_waiting_after ?? 0),
     allowed_payment_methods: allowedPaymentMethods,
+    rider_platform_fee: riderPlatformFee,
     resolvedAt: pricingRule ? new Date() : null,
+  };
+
+  // The surge this fare was quoted under, kept on the ride so the driver's
+  // offer can say "1.2x surge ride" and reports can separate surge income. The
+  // fare already includes it. Surge is set per vehicle type, so it is the
+  // booked vehicle's surge at the pickup - read here rather than taken from
+  // the app, whose older builds send one multiplier for every vehicle.
+  // `surgeMultiplier` from the app is only used if the vehicle is still
+  // surging, to keep the value the fare was quoted with.
+  const pickupSurge = await getSurgeAt(pickupCoords?.[1], pickupCoords?.[0]).catch(() => null);
+  const surgeProfiles = await getSurgeProfiles().catch(() => null);
+  const vehicleSurge = surgeProfiles
+    ? surgeForVehicle(pickupSurge, surgeProfiles, primaryVehicleTypeId).multiplier
+    : 1;
+  const quotedSurge = Number(serverPriced ? bookingFare.surgeMultiplier : surgeMultiplier);
+  // Parcel fares are never surged, so a parcel must not be labelled as one.
+  const rideSurgeMultiplier = !serverPriced
+    ? 1
+    : bookingFare.source === 'quote'
+      ? Math.max(1, Math.min(ABSOLUTE_MAX_MULTIPLIER, quotedSurge || 1))
+      : vehicleSurge > 1
+    ? Math.min(
+      ABSOLUTE_MAX_MULTIPLIER,
+      Number.isFinite(quotedSurge) && quotedSurge > 1 ? Math.min(quotedSurge, vehicleSurge) : vehicleSurge,
+    )
+    : 1;
+  const rideSurge = {
+    multiplier: Math.round(rideSurgeMultiplier * 100) / 100,
+    source: rideSurgeMultiplier > 1 ? 'automatic' : 'none',
+    hex: pickupSurge?.hex || '',
+  };
+
+  // City, airport or outstation, worked out here rather than trusted from the
+  // app, so reports and the driver can tell the trips apart.
+  const tripClass = await classifyTrip({ pickup: pickupCoords, drop: dropCoords }).catch(() => null);
+  const tripCategory = {
+    category: tripClass?.category || 'city',
+    airport_id: tripClass?.airport?.id || null,
+    airport_name: tripClass?.airport?.name || '',
+    airport_fee: Number(tripClass?.airport?.total_fee || 0),
   };
 
   const promoCode = typeof promo_code === 'string' ? promo_code.trim() : '';
@@ -1088,20 +1483,61 @@ export const createRideRecord = async ({
     throw new ApiError(400, 'Promo codes cannot be combined with subscription rides');
   }
 
+  // Never fatal: `resolveRideRoute` swallows its own failures and returns null,
+  // so a routing outage costs a polyline rather than the booking.
+  // The fare engine already routed this trip (through its stops); reuse it.
+  const resolvedRoute = bookingFare?.route?.polyline
+    ? { ...bookingFare.route, fetchedAt: bookingFare.route.fetchedAt || new Date() }
+    : await resolveRideRoute({ pickupCoords, dropCoords, stops: stopCoords });
+
+  // Deliveries send neither figure, and a rider's estimate is only ever a
+  // guess, so the routed values win where we have them.
+  const routedDistanceMeters = resolvedRoute?.distanceMeters > 0
+    ? resolvedRoute.distanceMeters
+    : (bookingFare?.distanceMeters > 0 ? bookingFare.distanceMeters : safeEstimatedDistanceMeters);
+  const routedDurationMinutes = resolvedRoute?.durationMinutes > 0
+    ? resolvedRoute.durationMinutes
+    : (bookingFare?.durationMinutes > 0 ? bookingFare.durationMinutes : safeEstimatedDurationMinutes);
+  const routeDocument = resolvedRoute
+    ? {
+        polyline: resolvedRoute.polyline,
+        distanceMeters: resolvedRoute.distanceMeters,
+        durationMinutes: resolvedRoute.durationMinutes,
+        provider: resolvedRoute.provider,
+        fetchedAt: resolvedRoute.fetchedAt,
+      }
+    : undefined;
+
+  // The rider's ride cashback comes off a fixed-fare ride's fare; it leaves
+  // their wallet only when this ride completes.
+  const cashbackRedemption = await resolveCashbackForBooking({
+    userId,
+    fare: effectiveStartingFare,
+    useCashback: useCashback !== false && String(useCashback).toLowerCase() !== 'false',
+    pricingNegotiationMode,
+    hasPromo: Boolean(promoCode),
+    isSubscriptionCovered,
+  }).catch(() => null);
+  const fareAfterCashback = cashbackRedemption
+    ? Math.round((effectiveStartingFare - cashbackRedemption.amount) * 100) / 100
+    : effectiveStartingFare;
+
   if (!promoCode) {
     const ride = await Ride.create({
       userId,
       vehicleTypeId: primaryVehicleTypeId,
       dispatchVehicleTypeIds,
-      vehicleIconType: vehicleIconType || '',
+      vehicleIconType: resolvedVehicleIconType,
       vehicleIconUrl: resolvedVehicleIconUrl,
+      ...(routeDocument ? { route: routeDocument } : {}),
       serviceType: normalizedServiceType,
       pickupLocation: toPoint(pickupCoords, 'pickup'),
       pickupAddress: normalizeAddress(pickupAddress),
       dropLocation: toPoint(dropCoords, 'drop'),
       dropAddress: normalizeAddress(dropAddress),
-      fare: effectiveStartingFare,
+      fare: fareAfterCashback,
       baseFare: safeFare,
+      ...(cashbackRedemption ? { cashbackRedemption } : {}),
       bookingMode: effectiveBookingMode,
       pricingNegotiationMode,
       biddingStatus: pricingNegotiationMode === 'driver_bid' ? 'open' : 'none',
@@ -1111,15 +1547,18 @@ export const createRideRecord = async ({
       bidCeilingMaxFare: effectiveBidCeilingMaxFare,
       fareIncreaseWaitMinutes: pricingNegotiationMode === 'user_increment_only' ? fareIncreaseWaitMinutes : 0,
       nextFareIncreaseAt,
-      estimatedDistanceMeters: safeEstimatedDistanceMeters,
-      estimatedDurationMinutes: safeEstimatedDurationMinutes,
+      estimatedDistanceMeters: routedDistanceMeters,
+      estimatedDurationMinutes: routedDurationMinutes,
       paymentMethod: effectivePaymentMethod,
       driverPaymentCollection: effectiveDriverPaymentCollection,
       subscriptionUsage: effectiveSubscriptionUsage,
-      otp: generateRideOtp(),
+      otp: riderOtp,
       service_location_id: resolvedServiceLocationId,
       transport_type: normalizedTransportType,
       pricingSnapshot,
+      surge: rideSurge,
+      ...(rideTollCharges ? { tollCharges: rideTollCharges } : {}),
+      trip_category: tripCategory,
       parcel: normalizeParcelPayload(parcel),
       intercity: normalizeIntercityPayload(intercity),
       scheduledAt: normalizedScheduledAt,
@@ -1133,6 +1572,12 @@ export const createRideRecord = async ({
 
     return ride;
   }
+
+  // The rider app never sends a service location, and the promo is scoped by
+  // one, so every booking with a coupon was refused outright. Work it out from
+  // the pickup when the request leaves it out. Resolved before the transaction
+  // so the zone lookup does not hold it open.
+  const promoServiceLocationId = resolvedServiceLocationId ? String(resolvedServiceLocationId) : null;
 
   let lastError = null;
 
@@ -1148,8 +1593,9 @@ export const createRideRecord = async ({
             userId,
             vehicleTypeId: primaryVehicleTypeId,
             dispatchVehicleTypeIds,
-            vehicleIconType: vehicleIconType || '',
+            vehicleIconType: resolvedVehicleIconType,
             vehicleIconUrl: resolvedVehicleIconUrl,
+            ...(routeDocument ? { route: routeDocument } : {}),
             serviceType: normalizedServiceType,
             pickupLocation: toPoint(pickupCoords, 'pickup'),
             pickupAddress: normalizeAddress(pickupAddress),
@@ -1166,15 +1612,18 @@ export const createRideRecord = async ({
             bidCeilingMaxFare: effectiveBidCeilingMaxFare,
             fareIncreaseWaitMinutes: pricingNegotiationMode === 'user_increment_only' ? fareIncreaseWaitMinutes : 0,
             nextFareIncreaseAt,
-            estimatedDistanceMeters: safeEstimatedDistanceMeters,
-            estimatedDurationMinutes: safeEstimatedDurationMinutes,
+            estimatedDistanceMeters: routedDistanceMeters,
+            estimatedDurationMinutes: routedDurationMinutes,
             paymentMethod: effectivePaymentMethod,
             driverPaymentCollection: effectiveDriverPaymentCollection,
             subscriptionUsage: effectiveSubscriptionUsage,
-            otp: generateRideOtp(),
+            otp: riderOtp,
             service_location_id: resolvedServiceLocationId,
             transport_type: normalizedTransportType,
             pricingSnapshot,
+            surge: rideSurge,
+            ...(rideTollCharges ? { tollCharges: rideTollCharges } : {}),
+            trip_category: tripCategory,
             parcel: normalizeParcelPayload(parcel),
             intercity: normalizeIntercityPayload(intercity),
             scheduledAt: normalizedScheduledAt,
@@ -1195,8 +1644,10 @@ export const createRideRecord = async ({
         ride: rideDoc,
         userId,
         code: promoCode,
-        fare: safeFare,
-        service_location_id,
+        // The fare the ride actually starts at (a raise-your-fare ride rounds
+        // the quote to whole rupees), so the coupon does not undo that.
+        fare: effectiveStartingFare,
+        service_location_id: promoServiceLocationId,
         transport_type: transport_type || 'taxi',
       });
 
@@ -1222,11 +1673,34 @@ export const createRideRecord = async ({
   throw lastError || new ApiError(500, 'Failed to create ride with promo');
 };
 
+/**
+ * The driver's last known position, to put on a ride the moment they accept
+ * it. Without it the rider's map had no car to draw until the driver's phone
+ * sent its first live fix - several seconds, longer on a weak signal. The live
+ * fixes overwrite it as they arrive. Nothing when the driver has no usable
+ * position on record.
+ */
+const driverLocationSeed = (driver) => {
+  const coordinates = driver?.location?.coordinates;
+  if (!Array.isArray(coordinates) || coordinates.length !== 2) return {};
+  const [lng, lat] = coordinates.map(Number);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng) || (lat === 0 && lng === 0)) return {};
+  return {
+    lastDriverLocation: {
+      type: 'Point',
+      coordinates: [lng, lat],
+      heading: null,
+      speed: null,
+      updatedAt: new Date(),
+    },
+  };
+};
+
 export const getRideDetails = async (rideId) => {
   const ride = await Ride.findById(rideId)
     .populate('deliveryId')
-    .populate('userId', 'name phone')
-    .populate('driverId', 'name phone profileImage vehicleType vehicleIconType vehicleNumber vehicleColor vehicleMake vehicleModel vehicleImage rating');
+    .populate('userId', 'name phone profileImage')
+    .populate('driverId', 'name phone profileImage vehicleType vehicleIconType vehicleNumber vehicleColor vehicleMake vehicleModel vehicleImage rating bankDetails.upiId bankDetails.qrCodeImage bankDetails.upiVerificationStatus bankDetails.upiVerifiedName');
 
   if (!ride) {
     throw new ApiError(404, 'Ride not found');
@@ -1242,8 +1716,8 @@ const activeRideStatuses = [RIDE_STATUS.SEARCHING, RIDE_STATUS.ACCEPTED, RIDE_ST
 const populateRideRealtime = async (rideId) =>
   Ride.findById(rideId)
     .populate('deliveryId')
-    .populate('userId', 'name phone')
-    .populate('driverId', 'name phone profileImage vehicleType vehicleIconType vehicleNumber vehicleColor vehicleMake vehicleModel vehicleImage rating');
+    .populate('userId', 'name phone profileImage')
+    .populate('driverId', 'name phone profileImage vehicleType vehicleIconType vehicleNumber vehicleColor vehicleMake vehicleModel vehicleImage rating bankDetails.upiId bankDetails.qrCodeImage bankDetails.upiVerificationStatus bankDetails.upiVerifiedName');
 
 export const serializeRideRealtime = (ride) => ({
   rideId: String(ride._id),
@@ -1267,7 +1741,32 @@ export const serializeRideRealtime = (ride) => ({
   acceptedBidId: ride.acceptedBidId ? String(ride.acceptedBidId) : null,
   estimatedDistanceMeters: ride.estimatedDistanceMeters || 0,
   estimatedDurationMinutes: ride.estimatedDurationMinutes || 0,
+  /// The stored road route. Both apps decode this rather than each fetching
+  /// their own, which is what keeps the rider's line and the driver's identical.
+  route: ride.route?.polyline
+    ? {
+        polyline: ride.route.polyline,
+        distanceMeters: Number(ride.route.distanceMeters || 0),
+        durationMinutes: Number(ride.route.durationMinutes || 0),
+        provider: ride.route.provider || '',
+      }
+    : null,
   paymentMethod: ride.paymentMethod,
+  collectedVia: ride.collectedVia || 'cash',
+  tollCharges: serializeTollCharges(ride.tollCharges),
+  // Driver's own static UPI handle + QR, exposed to the rider ONLY once admin
+  // has verified it. The rider app uses this at ride-end to render a scannable
+  // QR and a upi:// deep link. Never includes bank account number / IFSC.
+  driverPayment: (() => {
+    const bank = ride.driverId?.bankDetails;
+    if (!bank || bank.upiVerificationStatus !== 'verified') return null;
+    if (!bank.upiId && !bank.qrCodeImage) return null;
+    return {
+      upiId: bank.upiId || '',
+      qrCodeImage: bank.qrCodeImage || '',
+      payeeName: ride.driverId?.name || '',
+    };
+  })(),
   subscriptionUsage: ride.subscriptionUsage?.covered
     ? {
         covered: true,
@@ -1325,6 +1824,9 @@ export const serializeRideRealtime = (ride) => ({
         resolvedAt: ride.pricingSnapshot.resolvedAt || null,
       }
     : null,
+  // Lets the rider's map pick this vehicle's own art rather than the generic
+  // family silhouette, so both maps show the same thing.
+  vehicleTypeId: ride.vehicleTypeId ? String(ride.vehicleTypeId) : '',
   vehicleIconType: ride.vehicleIconType || '',
   vehicleIconUrl: ride.vehicleIconUrl || '',
   pickupLocation: ride.pickupLocation,
@@ -1353,6 +1855,7 @@ export const serializeRideRealtime = (ride) => ({
     senderRole: message.senderRole,
     senderId: String(message.senderId),
     message: message.message,
+    imageUrl: message.imageUrl || '',
     sentAt: message.sentAt,
   })),
 });
@@ -1392,8 +1895,8 @@ export const getActiveRideForIdentity = async ({ role, entityId }) => {
       status: { $in: activeRideStatuses },
     })
       .sort({ updatedAt: -1 })
-      .populate('userId', 'name phone')
-      .populate('driverId', 'name phone profileImage vehicleType vehicleIconType vehicleNumber vehicleColor vehicleMake vehicleModel vehicleImage rating');
+      .populate('userId', 'name phone profileImage')
+      .populate('driverId', 'name phone profileImage vehicleType vehicleIconType vehicleNumber vehicleColor vehicleMake vehicleModel vehicleImage rating bankDetails.upiId bankDetails.qrCodeImage bankDetails.upiVerificationStatus bankDetails.upiVerifiedName');
 
     return rides.find((ride) => !isRideScheduledForFuture(ride)) || null;
   }
@@ -1552,87 +2055,118 @@ export const listRideHistoryForIdentity = async ({ role, entityId, limit = 50, p
 };
 
 export const acceptRideAssignment = async ({ rideId, driverId }) => {
-  let lastError = null;
+  // Written without a transaction on purpose.
+  //
+  // This deployment runs a standalone mongod, which rejects transactions
+  // outright ("Transaction numbers are only allowed on a replica set member or
+  // mongos") — so the previous version could never accept a ride here at all.
+  //
+  // The atomicity that actually matters is narrow: exactly one driver may win a
+  // ride, and one driver may hold only one ride. Both are single-document
+  // conditions, and a conditional findOneAndUpdate is atomic on a single
+  // document without any transaction. The validations below are ordinary reads
+  // because re-reading them inside a transaction bought nothing the two claims
+  // below do not already guarantee.
+  const ride = await Ride.findOne({
+    _id: rideId,
+    status: RIDE_STATUS.SEARCHING,
+    driverId: null,
+  });
 
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const session = await mongoose.startSession();
-
-    try {
-      session.startTransaction();
-
-      const ride = await Ride.findOne({
-        _id: rideId,
-        status: RIDE_STATUS.SEARCHING,
-        driverId: null,
-      }).session(session);
-
-      if (!ride) {
-        throw new ApiError(409, 'Ride is no longer available for acceptance');
-      }
-
-      if (ride.bookingMode === 'bidding') {
-        throw new ApiError(409, 'Bidding rides must be won through bid acceptance');
-      }
-
-      const driverVehicleFilter = await buildDriverVehicleAcceptFilter(ride);
-      const driver = await Driver.findOne({
-        _id: driverId,
-        isOnline: true,
-        isOnRide: false,
-        'wallet.isBlocked': { $ne: true },
-        ...driverVehicleFilter,
-      }).session(session);
-
-      if (!driver) {
-        throw new ApiError(409, 'Driver is unavailable to accept this ride');
-      }
-
-      const blockedDriverIds = await getDriverIdsBlockedByUpcomingScheduledRides([driverId], { session });
-      if (blockedDriverIds.has(String(driverId))) {
-        throw new ApiError(409, 'Driver is blocked from new rides within 30 minutes of a scheduled trip');
-      }
-
-      const conflictingScheduledRide = await findDriverConflictingScheduledRide({
-        driverId,
-        ride,
-        excludeRideId: ride._id,
-        session,
-      });
-      if (conflictingScheduledRide) {
-        throw new ApiError(409, 'Driver already has another scheduled trip in a similar time range');
-      }
-
-      await ensureDriverWalletCanAcceptRide(driver, { session });
-
-      ride.driverId = driver._id;
-      ride.status = RIDE_STATUS.ACCEPTED;
-      ride.liveStatus = RIDE_LIVE_STATUS.ACCEPTED;
-      ride.acceptedAt = new Date();
-      driver.isOnRide = !isRideScheduledForFuture(ride);
-
-      await ride.save({ session });
-      await driver.save({ session });
-      await session.commitTransaction();
-      await syncDeliveryWithRide(ride);
-
-      return ride;
-    } catch (error) {
-      lastError = error;
-      await session.abortTransaction();
-
-      const isTransient =
-        typeof error?.hasErrorLabel === 'function' &&
-        (error.hasErrorLabel('TransientTransactionError') || error.hasErrorLabel('UnknownTransactionCommitResult'));
-
-      if (!isTransient || attempt === 2) {
-        throw error;
-      }
-    } finally {
-      session.endSession();
-    }
+  if (!ride) {
+    throw new ApiError(409, 'Ride is no longer available for acceptance');
   }
 
-  throw lastError || new ApiError(500, 'Failed to accept ride');
+  if (ride.bookingMode === 'bidding') {
+    throw new ApiError(409, 'Bidding rides must be won through bid acceptance');
+  }
+
+  const driverVehicleFilter = await buildDriverVehicleAcceptFilter(ride);
+  const driverFilter = {
+    _id: driverId,
+    isOnline: true,
+    isOnRide: false,
+    // Mirrors the dispatch filter. A fleet driver's wallet block is the
+    // owner's problem, not theirs, so dispatch keeps offering them rides -
+    // and accept used to refuse every one of them.
+    $and: [
+      { $or: [{ owner_id: { $ne: null } }, { 'wallet.isBlocked': { $ne: true } }] },
+      driverVehicleFilter,
+    ],
+  };
+
+  const driver = await Driver.findOne(driverFilter);
+
+  if (!driver) {
+    throw new ApiError(409, await explainWhyDriverCannotAccept({ driverId, ride }));
+  }
+
+  const blockedDriverIds = await getDriverIdsBlockedByUpcomingScheduledRides([driverId]);
+  if (blockedDriverIds.has(String(driverId))) {
+    throw new ApiError(409, 'Driver is blocked from new rides within 30 minutes of a scheduled trip');
+  }
+
+  const conflictingScheduledRide = await findDriverConflictingScheduledRide({
+    driverId,
+    ride,
+    excludeRideId: ride._id,
+  });
+  if (conflictingScheduledRide) {
+    throw new ApiError(409, 'Driver already has another scheduled trip in a similar time range');
+  }
+
+  await ensureDriverWalletCanAcceptRide(driver);
+
+  // A trip booked for later does not occupy the driver now — they keep taking
+  // rides until it is due.
+  const occupyDriver = !isRideScheduledForFuture(ride);
+
+  // Claim the driver first. The filter still requires isOnRide:false, so two
+  // rides landing on the same driver at once cannot both succeed.
+  const claimedDriver = await Driver.findOneAndUpdate(
+    driverFilter,
+    { $set: { isOnRide: occupyDriver } },
+    { new: true },
+  );
+
+  if (!claimedDriver) {
+    // Losing the claim after passing the checks above means another ride took
+    // this driver in the intervening milliseconds. That is the race the filter
+    // exists to win, not a misconfiguration, so it says so plainly.
+    throw new ApiError(409, 'Another ride was accepted a moment before this one');
+  }
+
+  // Then claim the ride. Same idea: the filter pins it to an unassigned,
+  // still-searching ride, so the second driver to arrive gets no document back.
+  const acceptedRide = await Ride.findOneAndUpdate(
+    { _id: rideId, status: RIDE_STATUS.SEARCHING, driverId: null },
+    {
+      $set: {
+        driverId: claimedDriver._id,
+        status: RIDE_STATUS.ACCEPTED,
+        liveStatus: RIDE_LIVE_STATUS.ACCEPTED,
+        acceptedAt: new Date(),
+        ...driverLocationSeed(claimedDriver),
+      },
+    },
+    { new: true },
+  );
+
+  if (!acceptedRide) {
+    // Someone else won the race between the two claims. Release this driver so
+    // they keep receiving offers instead of being stuck marked as on a trip.
+    if (occupyDriver) {
+      await Driver.updateOne(
+        { _id: claimedDriver._id, isOnRide: true },
+        { $set: { isOnRide: false } },
+      ).catch(() => null);
+    }
+    throw new ApiError(409, 'Ride is no longer available for acceptance');
+  }
+
+  await syncDeliveryWithRide(acceptedRide);
+
+  return acceptedRide;
 };
 
 const rideStatusConfig = {
@@ -1658,7 +2192,61 @@ const rideStatusConfig = {
   },
 };
 
-export const updateRideLifecycle = async ({ rideId, driverId, nextStatus, paymentMethod }) => {
+/// A parcel trip may only move forward once the driver has photographed the
+/// parcel at that stage.
+///
+/// This is the entire point of the proof photos: without the gate a driver
+/// could mark a parcel collected, or delivered, having never handled it, and
+/// neither sender nor receiver would have any record. Ordinary rides are
+/// untouched.
+const assertParcelProof = (ride, nextStatus) => {
+  if (String(ride?.serviceType || '') !== 'parcel') return;
+
+  if (nextStatus === RIDE_LIVE_STATUS.STARTED && !String(ride?.parcel?.pickupProof?.url || '').trim()) {
+    throw new ApiError(400, 'Upload a photo of the parcel before starting the delivery');
+  }
+
+  if (nextStatus === RIDE_LIVE_STATUS.COMPLETED && !String(ride?.parcel?.deliveryProof?.url || '').trim()) {
+    throw new ApiError(400, 'Upload a photo of the delivered parcel before completing');
+  }
+};
+
+/// Records a parcel proof photo against the ride.
+///
+/// `stage` is 'pickup' or 'delivery'. The updated ride comes back so the driver
+/// app can go straight on to the status change it was held up on. The Delivery
+/// mirror is refreshed too, since ride details read the parcel from there.
+export const saveParcelProof = async ({ rideId, driverId, stage, imageUrl }) => {
+  const normalizedStage = String(stage || '').trim().toLowerCase();
+
+  if (!['pickup', 'delivery'].includes(normalizedStage)) {
+    throw new ApiError(400, 'Proof stage must be pickup or delivery');
+  }
+
+  const url = String(imageUrl || '').trim();
+
+  if (!url || url.length > 2048) {
+    throw new ApiError(400, 'A parcel photo is required');
+  }
+
+  const field = normalizedStage === 'pickup' ? 'parcel.pickupProof' : 'parcel.deliveryProof';
+
+  const ride = await Ride.findOneAndUpdate(
+    { _id: rideId, driverId, serviceType: 'parcel' },
+    { $set: { [field + '.url']: url, [field + '.at']: new Date() } },
+    { returnDocument: 'after' },
+  );
+
+  if (!ride) {
+    throw new ApiError(404, 'Parcel delivery not found for this driver');
+  }
+
+  await syncDeliveryWithRide(ride);
+
+  return ride;
+};
+
+export const updateRideLifecycle = async ({ rideId, driverId, nextStatus, paymentMethod, collectedVia }) => {
   const config = rideStatusConfig[nextStatus];
 
   if (!config) {
@@ -1670,6 +2258,8 @@ export const updateRideLifecycle = async ({ rideId, driverId, nextStatus, paymen
   if (!ride) {
     throw new ApiError(404, 'Assigned ride not found');
   }
+
+  assertParcelProof(ride, nextStatus);
 
   if (!config.allowedCurrent.includes(ride.liveStatus)) {
     throw new ApiError(409, `Ride cannot move from ${ride.liveStatus} to ${nextStatus}`);
@@ -1690,12 +2280,34 @@ export const updateRideLifecycle = async ({ rideId, driverId, nextStatus, paymen
     ride.startedAt = new Date();
   }
 
-  if (paymentMethod !== undefined && paymentMethod !== null && String(paymentMethod).trim()) {
+  const normalizedCollectedVia = collectedVia !== undefined && collectedVia !== null
+    ? String(collectedVia).trim().toLowerCase()
+    : '';
+
+  // A rider who already paid the fare online in the app: the money reached ZI
+  // CAB and the driver's wallet, so whatever the driver taps it is recorded as
+  // online. Settlement stays cash-like either way (see verifyRazorpayRideFare).
+  const paidOnlineByRider = ride.driverPaymentCollection?.source === 'rider_fare_online'
+    && String(ride.driverPaymentCollection?.status || '').toLowerCase() === 'paid';
+
+  if (paidOnlineByRider) {
+    ride.collectedVia = 'online';
+    ride.paymentMethod = 'cash';
+  } else if (['cash', 'upi'].includes(normalizedCollectedVia)) {
+    // Driver collected the fare directly — cash in hand, or into their own UPI
+    // via their personal QR. Either way the money never reached the platform,
+    // so settlement must be cash-like (commission deducted from the driver's
+    // wallet). We record the real tender in collectedVia but force
+    // paymentMethod to 'cash' so settleCompletedRideWallet treats it correctly.
+    ride.collectedVia = normalizedCollectedVia;
+    ride.paymentMethod = 'cash';
+  } else if (paymentMethod !== undefined && paymentMethod !== null && String(paymentMethod).trim()) {
     ride.paymentMethod = normalizeRidePaymentMethod(paymentMethod);
   }
 
   if (nextStatus === RIDE_LIVE_STATUS.COMPLETED) {
     ride.completedAt = new Date();
+    await applyParcelWaitingCharge(ride);
   }
 
   await ride.save();
@@ -1720,8 +2332,31 @@ export const updateRideLifecycle = async ({ rideId, driverId, nextStatus, paymen
       distanceMeters: settledRide?.estimatedDistanceMeters,
     });
 
+    // The cashback this ride was discounted by leaves the rider's wallet now.
+    // Never blocks a completion.
+    if (Number(ride.cashbackRedemption?.amount) > 0) {
+      await consumeRideCashbackRedemption(ride)
+        .then(() => Ride.updateOne({ _id: ride._id }, { $set: { 'cashbackRedemption.consumedAt': new Date() } }))
+        .catch((error) => {
+          console.warn('[cashback] could not take used cashback for ride', String(ride._id), '-', error?.message);
+        });
+    }
+
     await processCompletedRideReferralReward(ride);
     await processCompletedDriverReferralReward(ride);
+    // Cashback must never block a completion.
+    await processRideCashback(ride).catch((error) => {
+      console.warn('[cashback] failed for ride', String(ride._id), '-', error?.message);
+    });
+
+    // Deliberately not awaited: the driver's "complete ride" tap should not wait
+    // on an SMTP round trip, and a mail failure must not fail the completion.
+    // sendRideInvoiceEmail resolves with {sent:false, reason} rather than throwing.
+    sendRideInvoiceEmail({ rideId: ride._id }).then((result) => {
+      if (!result.sent && result.reason !== 'no-customer-email') {
+        console.warn('[invoice] not sent for ride', String(ride._id), '-', result.reason);
+      }
+    });
   }
 
   const populatedRide = await populateRideRealtime(ride._id);
@@ -1730,11 +2365,12 @@ export const updateRideLifecycle = async ({ rideId, driverId, nextStatus, paymen
   return populatedRide;
 };
 
-export const appendRideMessage = async ({ rideId, role, senderId, message }) => {
+export const appendRideMessage = async ({ rideId, role, senderId, message, imageUrl }) => {
   const trimmedMessage = String(message || '').trim();
+  const trimmedImageUrl = String(imageUrl || '').trim();
 
-  if (!trimmedMessage) {
-    throw new ApiError(400, 'Message is required');
+  if (!trimmedMessage && !trimmedImageUrl) {
+    throw new ApiError(400, 'Message or image is required');
   }
 
   if (!['user', 'driver'].includes(role)) {
@@ -1753,6 +2389,7 @@ export const appendRideMessage = async ({ rideId, role, senderId, message }) => 
     senderRole: role,
     senderId,
     message: trimmedMessage,
+    imageUrl: trimmedImageUrl,
   });
 
   if (ride.messages.length > 200) {
@@ -1763,12 +2400,37 @@ export const appendRideMessage = async ({ rideId, role, senderId, message }) => 
 
   const latestMessage = ride.messages[ride.messages.length - 1];
 
+  // Push the message to the OTHER party so a backgrounded or closed app still
+  // gets it — the socket only reaches a live app. Fire-and-forget: a push
+  // failure must not fail sending the chat message.
+  try {
+    const fromDriver = role === 'driver';
+    const body = trimmedMessage || (trimmedImageUrl ? '📷 Photo' : '');
+    if (body) {
+      sendPushNotificationToEntities({
+        userIds: fromDriver && ride.userId ? [String(ride.userId)] : [],
+        driverIds: !fromDriver && ride.driverId ? [String(ride.driverId)] : [],
+        title: fromDriver ? 'Message from your driver' : 'Message from your rider',
+        body,
+        data: {
+          type: 'ride_message',
+          rideId: String(ride._id),
+          senderRole: role,
+          hasImage: trimmedImageUrl ? 'true' : 'false',
+        },
+      }).catch(() => {});
+    }
+  } catch (_) {
+    // ignore — chat delivery over the socket already succeeded
+  }
+
   return {
     id: String(latestMessage._id),
     rideId: String(ride._id),
     senderRole: latestMessage.senderRole,
     senderId: String(latestMessage.senderId),
     message: latestMessage.message,
+    imageUrl: latestMessage.imageUrl || '',
     sentAt: latestMessage.sentAt,
   };
 };
@@ -1994,6 +2656,97 @@ export const increaseRideBidCeiling = async ({ rideId, userId, incrementSteps = 
   return serializeRideRealtime(updatedRide);
 };
 
+/// Converts a still-searching fixed-fare booking into a driver-bid bidding ride.
+///
+/// The rider app offers this on the finding screen when no captain has accepted
+/// at the quoted price (e.g. after 60s on a parcel). It respects the same admin
+/// bidding policy as a booking made with bidding, computes the bid bands from
+/// the configured percentages, and re-dispatches so captains are re-offered the
+/// trip with the bidding block. The caller re-runs dispatch
+/// (`restartRideDispatchWithLatestFare`) and notifies the room.
+export const enableRideBidding = async ({ rideId, userId, userMaxBidFare }) => {
+  const ride = await Ride.findOne({
+    _id: rideId,
+    userId,
+    status: RIDE_STATUS.SEARCHING,
+    liveStatus: RIDE_LIVE_STATUS.SEARCHING,
+    driverId: null,
+  });
+
+  if (!ride) {
+    throw new ApiError(404, 'Active ride not found');
+  }
+
+  if (ride.bookingMode === 'bidding' || ride.pricingNegotiationMode === 'driver_bid') {
+    // Already a bidding ride — nothing to convert.
+    return serializeRideRealtime(ride);
+  }
+
+  const bidRideSettings = await getBidRideSettings();
+  const primaryVehicle = ride.vehicleTypeId
+    ? await Vehicle.findById(ride.vehicleTypeId).select('dispatch_type').lean()
+    : null;
+  const policy = await resolveBiddingPolicy({
+    vehicle: primaryVehicle,
+    serviceType: normalizeServiceType(ride.serviceType),
+    distanceMeters: Number(ride.estimatedDistanceMeters || 0),
+    bidSettings: bidRideSettings,
+  });
+  if (!policy.allowed) {
+    throw new ApiError(400, 'Bidding is not available for this booking');
+  }
+  // Captains naming their price is switched off everywhere (see
+  // resolveBiddingPolicy): parcels negotiate like rides, the sender raises
+  // their own fare. Older app builds still offer "let captains bid" on a
+  // parcel; they get this instead of a switch to a mode we no longer run.
+  if (policy.mode !== 'driver_bid') {
+    throw new ApiError(409, 'Captains do not bid on ZI CAB. Use Raise fare to reach more captains.');
+  }
+
+  const baseFare = Math.max(0, Math.round(Number(ride.baseFare || ride.fare || 0)));
+  const stepAmount = normalizeBidStepAmount(bidRideSettings.user_bidding_amount_increase_or_decrease);
+  const range = resolveBidRideRange({ baseFare, bidStepAmount: stepAmount, settings: bidRideSettings });
+  const ceiling = Math.min(range.userBidCeilingFare, range.driverBidCeilingFare);
+  const userMax = clampBidAmountWithinRange({
+    amount: userMaxBidFare,
+    minFare: range.userBidFloorFare,
+    maxFare: ceiling,
+    baseFare,
+    bidStepAmount: stepAmount,
+  });
+
+  const updatedRide = await Ride.findOneAndUpdate(
+    {
+      _id: rideId,
+      userId,
+      status: RIDE_STATUS.SEARCHING,
+      liveStatus: RIDE_LIVE_STATUS.SEARCHING,
+      driverId: null,
+      bookingMode: { $ne: 'bidding' },
+    },
+    {
+      $set: {
+        bookingMode: 'bidding',
+        pricingNegotiationMode: 'driver_bid',
+        biddingStatus: 'open',
+        bidStepAmount: stepAmount,
+        bidFloorFare: range.driverBidFloorFare,
+        userMaxBidFare: userMax,
+        bidCeilingMaxFare: ceiling,
+        fare: baseFare,
+        nextFareIncreaseAt: null,
+      },
+    },
+    { returnDocument: 'after', runValidators: true },
+  );
+
+  if (!updatedRide) {
+    throw new ApiError(409, 'Ride is no longer open for bidding');
+  }
+
+  return serializeRideRealtime(updatedRide);
+};
+
 export const acceptRideBidAssignment = async ({ rideId, bidId, userId }) => {
   let lastError = null;
 
@@ -2064,6 +2817,7 @@ export const acceptRideBidAssignment = async ({ rideId, bidId, userId }) => {
       ride.liveStatus = RIDE_LIVE_STATUS.ACCEPTED;
       ride.biddingStatus = 'accepted';
       ride.acceptedAt = new Date();
+      Object.assign(ride, driverLocationSeed(driver));
       driver.isOnRide = !isRideScheduledForFuture(ride);
       bid.status = 'accepted';
 

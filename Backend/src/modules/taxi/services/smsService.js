@@ -2,9 +2,10 @@ import { env } from '../../../config/env.js';
 import { ApiError } from '../../../utils/ApiError.js';
 import { AdminBusinessSetting } from '../admin/models/AdminBusinessSetting.js';
 
-const SMS_INDIA_HUB_ENDPOINT = 'http://cloud.smsindiahub.in/api/mt/SendSMS';
+// Only pushsms.aspx matches DLT templates; /api/mt/SendSMS returns 006.
+const SMS_INDIA_HUB_ENDPOINT = 'http://cloud.smsindiahub.in/vendorsms/pushsms.aspx';
 const DLT_TEMPLATE_TEXT =
-  'Welcome to the ##var## powered by SMSINDIAHUB. Your OTP for registration is ##var##';
+  'Welcome to the ##var## powered by Appzeto.Your OTP for registration is ##var##.BGADEC';
 const DEFAULT_BRAND_NAME = 'App';
 
 const isTruthy = (value) => ['1', 'true', 'yes', 'on'].includes(String(value || '').trim().toLowerCase());
@@ -63,7 +64,7 @@ const getSmsIndiaHubConfig = () => {
   const templateId = readValue(
     env.sms?.indiaHub?.dltTemplateId,
     process.env.SMS_INDIA_HUB_DLT_TEMPLATE_ID,
-    '1007801291964877107',
+    '1007282516644508833',
   );
 
   return {
@@ -175,12 +176,11 @@ const buildSmsPayload = ({ phone, otp, appName, authMode = 'apiKey' }) => {
   }
 
   const payload = new URLSearchParams({
-    senderid: config.senderId,
-    channel: 'Trans',
-    DCS: '0',
-    flashsms: '0',
-    number: normalizedPhone,
-    text: renderOtpMessage({ appName, otp }),
+    sid: config.senderId,
+    msisdn: normalizedPhone,
+    msg: renderOtpMessage({ appName, otp }),
+    fl: '0',
+    gwid: '2',
     TemplateId: config.templateId,
   });
 
@@ -206,7 +206,12 @@ export const sendOtpSms = async ({ phone, otp, purpose = 'otp' }) => {
 
   const config = getSmsIndiaHubConfig();
   const brandName = await getConfiguredBrandName();
-  const authModes = config.apiKey ? ['apiKey', 'credentials'] : ['credentials'];
+  const authModes = [];
+  if (config.apiKey) authModes.push('apiKey');
+  if (config.user && config.password) authModes.push('credentials');
+  if (!authModes.length) {
+    throw new ApiError(500, 'SMS India Hub is not configured: set SMS_INDIA_HUB_API_KEY, or both SMS_INDIA_HUB_USERNAME and SMS_INDIA_HUB_PASSWORD');
+  }
   let finalResponse = null;
   let finalResponseText = '';
   let delivered = false;
@@ -308,7 +313,7 @@ export const sendOtpSms = async ({ phone, otp, purpose = 'otp' }) => {
   if (looksFailed) {
     throw new ApiError(
       502,
-      `SMS India Hub rejected ${purpose} request: ${finalResponseText || finalResponse.statusText}`,
+      `SMS India Hub rejected ${purpose} request: ${finalResponseText || finalResponse?.statusText || 'no response from provider'}`,
     );
   }
 
@@ -318,4 +323,50 @@ export const sendOtpSms = async ({ phone, otp, purpose = 'otp' }) => {
     providerResponse: finalResponseText,
     jobId: parsedFinalResponse?.JobId || null,
   };
+};
+
+/// Sends a non-OTP message on a DLT-registered template. Indian carriers drop
+/// anything that doesn't match a registered template word for word, so the
+/// caller passes the template id and the text with its {#var#} slots already
+/// filled. Returns { mode: 'skipped' } when SMS isn't configured, instead of
+/// failing the action that triggered it.
+export const sendTemplatedSms = async ({ phone, templateId, message }) => {
+  const config = getSmsIndiaHubConfig();
+  if (!templateId || !message || !config.senderId || (!config.apiKey && !(config.user && config.password))) {
+    return { mode: 'skipped', message: 'SMS template or provider not configured' };
+  }
+
+  const normalizedPhone = normalizeIndianPhone(phone);
+  if (!/^91\d{10}$/.test(normalizedPhone)) {
+    return { mode: 'skipped', message: 'Not an Indian mobile number' };
+  }
+
+  const payload = new URLSearchParams({
+    sid: config.senderId,
+    msisdn: normalizedPhone,
+    msg: message,
+    fl: '0',
+    gwid: '2',
+    TemplateId: templateId,
+  });
+  if (config.apiKey) {
+    payload.set('APIKey', config.apiKey);
+  } else {
+    payload.set('user', config.user);
+    payload.set('password', config.password);
+  }
+
+  const response = await fetch(SMS_INDIA_HUB_ENDPOINT, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      Accept: 'application/json, text/plain;q=0.9, */*;q=0.8',
+    },
+    body: payload.toString(),
+  });
+  const responseText = (await response.text()).trim();
+  if (!isSuccessfulProviderResponse(response, responseText)) {
+    throw new ApiError(502, `SMS India Hub rejected message: ${responseText || response.statusText}`);
+  }
+  return { mode: 'live', providerResponse: responseText };
 };

@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
 import { randomBytes } from 'node:crypto';
 import { ApiError } from '../../../../utils/ApiError.js';
+import { uploadDataUrl } from '../../../../utils/fileUpload.js';
 import { env } from '../../../../config/env.js';
 import { createDefaultAdminState } from '../data/defaultAdminState.js';
 import { Admin } from '../models/Admin.js';
@@ -12,10 +13,12 @@ import { AdminAppSetting } from '../models/AdminAppSetting.js';
 // AppModule import removed
 import { createDefaultBusinessSettings } from '../data/defaultBusinessSettings.js';
 import { createDefaultAppSettings } from '../data/defaultAppSettings.js';
+import { createDefaultRideVoiceSettings } from '../data/defaultRideVoiceSettings.js';
 import { Airport } from '../models/Airport.js';
 import { Employee } from '../models/Employee.js';
 import { BusService } from '../models/BusService.js';
 import { DriverNeededDocument } from '../models/DriverNeededDocument.js';
+import { AdminActivity } from '../models/AdminActivity.js';
 import { GoodsType } from '../models/GoodsType.js';
 import { OwnerNeededDocument } from '../models/OwnerNeededDocument.js';
 import { OwnerBooking } from '../models/OwnerBooking.js';
@@ -30,11 +33,13 @@ import { PoolingRoute } from '../models/PoolingRoute.js';
 import { RentalVehicleType } from '../models/RentalVehicleType.js';
 import { RentalQuoteRequest } from '../models/RentalQuoteRequest.js';
 import { SetPrice } from '../models/SetPrice.js';
+import { describeRidePayment } from '../../services/paymentLedgerService.js';
 import { ServiceLocation } from '../models/ServiceLocation.js';
 import { ServiceCenterStaff } from '../models/ServiceCenterStaff.js';
 import { ServiceStore } from '../models/ServiceStore.js';
 import { Vehicle } from '../models/Vehicle.js';
 import { Driver } from '../../driver/models/Driver.js';
+import { DriverSubscription } from '../../driver/models/DriverSubscription.js';
 import { BusDriver } from '../../driver/models/BusDriver.js';
 import { Zone } from '../../driver/models/Zone.js';
 import { Ride } from '../../user/models/Ride.js';
@@ -53,20 +58,34 @@ import { WithdrawalRequest } from '../models/WithdrawalRequest.js';
 import { SupportTicket } from '../../support/models/SupportTicket.js';
 import TaxiTransportType from '../models/TaxiTransportType.js';
 import { comparePassword, hashPassword } from '../../driver/services/authService.js';
-import {
+import { grantDriverJoiningBonus,
   applyDriverWalletAdjustment,
   serializeDriverWallet,
+  syncDriverWalletBlockedFlag,
 } from '../../driver/services/walletService.js';
+import {
+  grantFreeTrialIfEligible,
+  purchaseDriverSubscriptionFromJoiningBonus,
+} from '../../driver/services/driverSubscriptionService.js';
 import { RIDE_LIVE_STATUS, RIDE_STATUS, VEHICLE_TYPES } from '../../constants/index.js';
 import {
   cancelRideByAdmin,
   emitToDriver,
+  getSocketServer,
   notifyUserAccountDeleted,
 } from '../../services/dispatchService.js';
+import { getSupportRoleRoom } from '../../chat/services/supportChatService.js';
+import { SafetyAlert } from '../../common/models/SafetyAlert.js';
+import { getRedisStatus } from '../../../../infrastructure/redis/redisClient.js';
 import { buildRentalTrackingSnapshot, listActiveRentalTrackingBookings } from '../../services/rentalTrackingService.js';
 import { sendEmail } from '../../services/mailService.js';
 import { getActivePaymentGateway, normalizePaymentSettingsPayload } from '../../services/paymentGatewayService.js';
 import { signAccessToken } from '../../services/tokenService.js';
+import { applyPriceHikeToSetPrice, getActivePriceHikeMultiplier } from '../../services/priceHikeService.js';
+import { DEFAULT_PROFILE, getSurgeProfiles, listActiveSurges, resetVehicleSurgeSettings, updateSurgeSettings } from '../../services/surgeService.js';
+import { getBidRideSettings } from '../../services/transportSettingsService.js';
+import { resolveCatalogDispatchType } from '../../services/biddingPolicyService.js';
+import { PriceHike } from '../models/PriceHike.js';
 import {
   ADMIN_PERMISSIONS,
   SUPERADMIN_PERMISSION,
@@ -383,6 +402,7 @@ const serializeAdminSummary = (admin, serviceLocationMap = new Map(), zoneMap = 
     role: admin.role || '',
     admin_type: normalizeAdminType(admin.admin_type || admin.role),
     permissions: normalizeAdminPermissions(admin.permissions || []),
+    read_only: admin.read_only === true,
     service_location_ids: serviceLocationIds,
     zone_ids: zoneIds,
     service_locations: serviceLocationIds
@@ -467,7 +487,7 @@ const normalizeDriverVehicleFieldType = (value) => {
 
 const DRIVER_VEHICLE_FIELD_DEFINITIONS = {
   locationId: { label: 'Operating City', field_type: 'location_select', field_group: 'common', account_type: 'both', sort_order: 10 },
-  serviceCategories: { label: 'Service Category', field_type: 'multi_select', field_group: 'driver', account_type: 'individual', sort_order: 20, options: ['taxi', 'outstation', 'delivery', 'pooling'] },
+  serviceCategories: { label: 'Service Category', field_type: 'multi_select', field_group: 'driver', account_type: 'individual', sort_order: 20, options: ['taxi', 'outstation', 'delivery', 'pooling', 'airport'] },
   vehicleTypeId: { label: 'Vehicle Type', field_type: 'vehicle_type_select', field_group: 'driver', account_type: 'individual', sort_order: 30 },
   make: { label: 'Brand / Make', field_type: 'text', field_group: 'driver', account_type: 'individual', sort_order: 40, placeholder: 'e.g. Maruti Suzuki' },
   model: { label: 'Model', field_type: 'text', field_group: 'driver', account_type: 'individual', sort_order: 50, placeholder: 'Swift, Bolt' },
@@ -558,7 +578,7 @@ const normalizeDriverServiceCategories = (value, fallback = 'taxi') => {
     rawValues
       .map((item) => String(item || '').trim().toLowerCase())
       .flatMap((item) => item === 'both' ? ['taxi', 'outstation'] : item ? [item] : [])
-      .filter((item) => ['taxi', 'outstation', 'delivery', 'pooling'].includes(item)),
+      .filter((item) => ['taxi', 'outstation', 'delivery', 'pooling', 'airport'].includes(item)),
   )];
 
   if (normalized.length > 0) {
@@ -671,6 +691,7 @@ const normalizeBusSeatCell = (cell = {}) => {
     label: sanitizeBusText(cell.label),
     variant: sanitizeBusText(cell.variant, 'seat') || 'seat',
     status: cell.status === 'blocked' ? 'blocked' : 'available',
+    ladiesOnly: cell.ladiesOnly === true,
   };
 };
 
@@ -691,7 +712,37 @@ const normalizeBusStop = (stop = {}, index = 0) => ({
   stopType: ['pickup', 'drop', 'both'].includes(stop.stopType) ? stop.stopType : 'pickup',
   arrivalTime: sanitizeBusText(stop.arrivalTime),
   departureTime: sanitizeBusText(stop.departureTime),
+  coords: sanitizeBusCoords(stop.coords),
 });
+
+// One route shape for the main, return and extra routes. Fields missing from
+// `source` fall back to `fallback` (the stored route when updating).
+const normalizeBusRoute = (source = {}, fallback = {}) => {
+  const from = source && typeof source === 'object' ? source : {};
+  const base = fallback && typeof fallback === 'object' ? fallback : {};
+  const stops = Array.isArray(from.stops) ? from.stops : Array.isArray(base.stops) ? base.stops : [];
+  return {
+    routeName: sanitizeBusText(from.routeName, base.routeName || ''),
+    originCity: sanitizeBusText(from.originCity, base.originCity || ''),
+    destinationCity: sanitizeBusText(from.destinationCity, base.destinationCity || ''),
+    originCoords: sanitizeBusCoords(from.originCoords ?? base.originCoords),
+    destinationCoords: sanitizeBusCoords(from.destinationCoords ?? base.destinationCoords),
+    distanceKm: sanitizeBusText(from.distanceKm, base.distanceKm || ''),
+    durationHours: sanitizeBusText(from.durationHours, base.durationHours || ''),
+    stops: stops.map((stop, index) => normalizeBusStop(stop, index)),
+    autoTimings: Boolean(from.autoTimings ?? base.autoTimings ?? true),
+  };
+};
+
+const normalizeBusExtraRoutes = (routes, fallback = []) => {
+  const list = Array.isArray(routes) ? routes : Array.isArray(fallback) ? fallback : [];
+  return list
+    .map((item, index) => ({
+      id: sanitizeBusText(item?.id, `route-${Date.now()}-${index}`),
+      ...normalizeBusRoute(item),
+    }))
+    .filter((item) => item.originCity && item.destinationCity);
+};
 
 const normalizeBusSchedule = (schedule = {}, index = 0) => ({
   id: sanitizeBusText(schedule.id, `schedule-${Date.now()}-${index}`),
@@ -702,6 +753,7 @@ const normalizeBusSchedule = (schedule = {}, index = 0) => ({
     ? schedule.activeDays.filter((day) => BUS_DAY_OPTIONS.includes(day))
     : [],
   status: ['active', 'paused', 'draft'].includes(schedule.status) ? schedule.status : 'active',
+  routeKey: sanitizeBusText(schedule.routeKey, 'main') || 'main',
 });
 
 const normalizeBusCancellationRule = (rule = {}, index = 0) => ({
@@ -718,11 +770,46 @@ const normalizeBusCancellationRule = (rule = {}, index = 0) => ({
   notes: sanitizeBusText(rule.notes),
 });
 
+const normalizeBusSeatNumbering = (value = {}) => {
+  const mode = ['auto', 'manual', 'excel'].includes(value?.mode) ? value.mode : '';
+  return {
+    mode,
+    pattern: mode === 'auto' ? sanitizeBusText(value?.pattern) : '',
+    start: Math.max(1, Math.floor(Number(value?.start) || 1)),
+  };
+};
+
+/// Seat numbers set by hand, sheet or pattern must each be unique on the bus.
+/// Buses still on their generated numbers aren't checked: those can repeat across
+/// decks, and refusing them would stop older buses from saving.
+const assertValidBusSeatNumbers = (blueprint) => {
+  if (!blueprint.seatNumbering?.mode) return;
+  const seen = new Set();
+  [...blueprint.lowerDeck, ...blueprint.upperDeck].flat().forEach((cell) => {
+    if (cell.kind !== 'seat') return;
+    const label = String(cell.label || '').trim();
+    if (!/^[A-Za-z0-9-]{1,5}$/.test(label)) {
+      throw new ApiError(400, `Seat number "${label}" must be up to 5 letters, numbers or hyphens`);
+    }
+    const key = label.toLowerCase();
+    if (seen.has(key)) {
+      throw new ApiError(400, `Seat number ${label} is used more than once`);
+    }
+    seen.add(key);
+  });
+};
+
+export const normalizeSeatLayoutOrientation = (value) =>
+  String(value || '').trim().toLowerCase() === 'vertical' ? 'vertical' : 'horizontal';
+
 const normalizeBusServicePayload = (payload = {}, existing = {}) => {
   const blueprint = {
     templateKey: sanitizeBusText(
       payload.blueprint?.templateKey,
       existing.blueprint?.templateKey || 'seater_2_2',
+    ),
+    seatLayoutOrientation: normalizeSeatLayoutOrientation(
+      payload.blueprint?.seatLayoutOrientation ?? existing.blueprint?.seatLayoutOrientation,
     ),
     layoutConfig: normalizeBusLayoutConfig(
       payload.blueprint?.layoutConfig,
@@ -730,43 +817,23 @@ const normalizeBusServicePayload = (payload = {}, existing = {}) => {
     ),
     lowerDeck: normalizeBusDeck(payload.blueprint?.lowerDeck ?? existing.blueprint?.lowerDeck ?? []),
     upperDeck: normalizeBusDeck(payload.blueprint?.upperDeck ?? existing.blueprint?.upperDeck ?? []),
+    seatNumbering: normalizeBusSeatNumbering(payload.blueprint?.seatNumbering ?? existing.blueprint?.seatNumbering),
   };
+  assertValidBusSeatNumbers(blueprint);
 
-  const route = {
-    routeName: sanitizeBusText(payload.route?.routeName, existing.route?.routeName || ''),
-    originCity: sanitizeBusText(payload.route?.originCity, existing.route?.originCity || ''),
-    destinationCity: sanitizeBusText(payload.route?.destinationCity, existing.route?.destinationCity || ''),
-    originCoords: sanitizeBusCoords(payload.route?.originCoords ?? existing.route?.originCoords),
-    destinationCoords: sanitizeBusCoords(payload.route?.destinationCoords ?? existing.route?.destinationCoords),
-    distanceKm: sanitizeBusText(payload.route?.distanceKm, existing.route?.distanceKm || ''),
-    durationHours: sanitizeBusText(payload.route?.durationHours, existing.route?.durationHours || ''),
-    stops: Array.isArray(payload.route?.stops)
-      ? payload.route.stops.map((stop, index) => normalizeBusStop(stop, index))
-      : Array.isArray(existing.route?.stops)
-        ? existing.route.stops.map((stop, index) => normalizeBusStop(stop, index))
-        : [],
-  };
+  const route = normalizeBusRoute(payload.route, existing.route);
+  const returnRoute = normalizeBusRoute(payload.returnRoute, existing.returnRoute);
+  const extraRoutes = normalizeBusExtraRoutes(payload.extraRoutes, existing.extraRoutes);
 
-  const returnRoute = {
-    routeName: sanitizeBusText(payload.returnRoute?.routeName, existing.returnRoute?.routeName || ''),
-    originCity: sanitizeBusText(payload.returnRoute?.originCity, existing.returnRoute?.originCity || ''),
-    destinationCity: sanitizeBusText(payload.returnRoute?.destinationCity, existing.returnRoute?.destinationCity || ''),
-    originCoords: sanitizeBusCoords(payload.returnRoute?.originCoords ?? existing.returnRoute?.originCoords),
-    destinationCoords: sanitizeBusCoords(payload.returnRoute?.destinationCoords ?? existing.returnRoute?.destinationCoords),
-    distanceKm: sanitizeBusText(payload.returnRoute?.distanceKm, existing.returnRoute?.distanceKm || ''),
-    durationHours: sanitizeBusText(payload.returnRoute?.durationHours, existing.returnRoute?.durationHours || ''),
-    stops: Array.isArray(payload.returnRoute?.stops)
-      ? payload.returnRoute.stops.map((stop, index) => normalizeBusStop(stop, index))
-      : Array.isArray(existing.returnRoute?.stops)
-        ? existing.returnRoute.stops.map((stop, index) => normalizeBusStop(stop, index))
-        : [],
-  };
-
-  const schedules = Array.isArray(payload.schedules)
+  const routeKeys = new Set(['main', ...extraRoutes.map((item) => item.id)]);
+  const returnRouteEnabled = Boolean(payload.returnRouteEnabled ?? existing.returnRouteEnabled ?? false);
+  if (returnRouteEnabled) routeKeys.add('return');
+  const schedules = (Array.isArray(payload.schedules)
     ? payload.schedules.map((schedule, index) => normalizeBusSchedule(schedule, index))
     : Array.isArray(existing.schedules)
       ? existing.schedules.map((schedule, index) => normalizeBusSchedule(schedule, index))
-      : [];
+      : []
+  ).map((schedule) => (routeKeys.has(schedule.routeKey) ? schedule : { ...schedule, routeKey: 'main' }));
 
   const cancellationRules = Array.isArray(payload.cancellationRules)
     ? payload.cancellationRules.map((rule, index) => normalizeBusCancellationRule(rule, index))
@@ -833,8 +900,9 @@ const normalizeBusServicePayload = (payload = {}, existing = {}) => {
         : [],
     blueprint,
     route,
-    returnRouteEnabled: Boolean(payload.returnRouteEnabled ?? existing.returnRouteEnabled ?? false),
+    returnRouteEnabled,
     returnRoute,
+    extraRoutes,
     schedules,
     capacity,
     status: ['draft', 'active', 'paused'].includes(payload.status) ? payload.status : existing.status || 'draft',
@@ -879,35 +947,16 @@ const serializeBusService = (item = {}) => ({
   galleryImages: Array.isArray(item.galleryImages) ? item.galleryImages.filter(Boolean) : [],
   blueprint: {
     templateKey: item.blueprint?.templateKey || 'seater_2_2',
+    seatLayoutOrientation: normalizeSeatLayoutOrientation(item.blueprint?.seatLayoutOrientation),
     layoutConfig: normalizeBusLayoutConfig(item.blueprint?.layoutConfig || {}),
     lowerDeck: normalizeBusDeck(item.blueprint?.lowerDeck || []),
     upperDeck: normalizeBusDeck(item.blueprint?.upperDeck || []),
+    seatNumbering: normalizeBusSeatNumbering(item.blueprint?.seatNumbering),
   },
-  route: {
-    routeName: item.route?.routeName || '',
-    originCity: item.route?.originCity || '',
-    destinationCity: item.route?.destinationCity || '',
-    originCoords: sanitizeBusCoords(item.route?.originCoords),
-    destinationCoords: sanitizeBusCoords(item.route?.destinationCoords),
-    distanceKm: item.route?.distanceKm || '',
-    durationHours: item.route?.durationHours || '',
-    stops: Array.isArray(item.route?.stops)
-      ? item.route.stops.map((stop, index) => normalizeBusStop(stop, index))
-      : [],
-  },
+  route: normalizeBusRoute(item.route),
   returnRouteEnabled: Boolean(item.returnRouteEnabled),
-  returnRoute: {
-    routeName: item.returnRoute?.routeName || '',
-    originCity: item.returnRoute?.originCity || '',
-    destinationCity: item.returnRoute?.destinationCity || '',
-    originCoords: sanitizeBusCoords(item.returnRoute?.originCoords),
-    destinationCoords: sanitizeBusCoords(item.returnRoute?.destinationCoords),
-    distanceKm: item.returnRoute?.distanceKm || '',
-    durationHours: item.returnRoute?.durationHours || '',
-    stops: Array.isArray(item.returnRoute?.stops)
-      ? item.returnRoute.stops.map((stop, index) => normalizeBusStop(stop, index))
-      : [],
-  },
+  returnRoute: normalizeBusRoute(item.returnRoute),
+  extraRoutes: normalizeBusExtraRoutes(item.extraRoutes),
   schedules: Array.isArray(item.schedules)
     ? item.schedules.map((schedule, index) => normalizeBusSchedule(schedule, index))
     : [],
@@ -2023,6 +2072,12 @@ const normalizeServiceStoreRentalCommission = (value = {}, existing = {}) => ({
   ),
 });
 
+/** The vehicle type id of a serialized set-price row, whatever its shape. */
+const setPriceVehicleId = (row) => {
+  const value = row?.type_id || row?.vehicle_type;
+  return value?._id || value || null;
+};
+
 const serializeSetPrice = (item) => ({
   _id: item._id,
   id: item._id,
@@ -2081,6 +2136,7 @@ const serializeSetPrice = (item) => ({
   outstation_base_price: item.outstation_base_price ?? 0,
   outstation_base_distance: item.outstation_base_distance ?? 0,
   outstation_price_per_distance: item.outstation_price_per_distance ?? 0,
+  outstation_round_trip_price_per_distance: item.outstation_round_trip_price_per_distance ?? 0,
   outstation_time_price: item.outstation_time_price ?? 0,
   free_waiting_before: item.free_waiting_before,
   free_waiting_after: item.free_waiting_after,
@@ -2659,6 +2715,7 @@ const serializeDriver = (driver) => ({
   service_categories: Array.isArray(driver.serviceCategories) ? driver.serviceCategories : [],
   vehicle_type: driver.vehicleType || '',
   vehicle_type_id: driver.vehicleTypeId || null,
+  vehicle_type_ids: Array.isArray(driver.vehicleTypeIds) ? driver.vehicleTypeIds : [],
   vehicleIconType: driver.vehicleIconType || driver.vehicleType || '',
   vehicleImage: driver.vehicleImage || '',
   vehicle_make: driver.vehicleMake || '',
@@ -2677,6 +2734,26 @@ const serializeDriver = (driver) => ({
   deletionRequest: driver.deletionRequest || { status: 'none' },
   documents: driver.documents || {},
   onboarding: driver.onboarding || {},
+  wallet: {
+    balance: Number(driver.wallet?.balance || 0),
+    cash_limit: Number(driver.wallet?.cashLimit ?? 500),
+    cashLimit: Number(driver.wallet?.cashLimit ?? 500),
+    is_blocked: Boolean(driver.wallet?.isBlocked),
+    isBlocked: Boolean(driver.wallet?.isBlocked),
+    total_credits: Number(driver.wallet?.totalCredits || 0),
+    total_debits: Number(driver.wallet?.totalDebits || 0),
+    updatedAt: driver.wallet?.updatedAt || null,
+  },
+  wallet_balance: Number(driver.wallet?.balance || 0),
+  // Driver's own payment UPI/QR shown to riders at ride-end. Only the UPI
+  // subfields are surfaced here — never the bank account number / IFSC.
+  paymentUpi: {
+    upiId: driver.bankDetails?.upiId || '',
+    qrCodeImage: driver.bankDetails?.qrCodeImage || '',
+    verificationStatus: driver.bankDetails?.upiVerificationStatus || 'pending',
+    verifiedName: driver.bankDetails?.upiVerifiedName || '',
+    verifiedAt: driver.bankDetails?.upiVerifiedAt || null,
+  },
   createdAt: driver.createdAt,
   updatedAt: driver.updatedAt,
 });
@@ -2705,6 +2782,7 @@ const DRIVER_LIST_SELECT = [
   'isOnRide',
   'onlineSelfie',
   'location',
+  'wallet',
   'approve',
   'status',
   'createdAt',
@@ -2750,8 +2828,22 @@ const serializeDriverListItem = (driver) => ({
   online_selfie_captured_at: driver.onlineSelfie?.capturedAt || null,
   online_selfie_for_date: driver.onlineSelfie?.forDate || '',
   location: driver.location || null,
+  wallet: {
+    balance: Number(driver.wallet?.balance || 0),
+    cash_limit: Number(driver.wallet?.cashLimit ?? 500),
+    cashLimit: Number(driver.wallet?.cashLimit ?? 500),
+    is_blocked: Boolean(driver.wallet?.isBlocked),
+    isBlocked: Boolean(driver.wallet?.isBlocked),
+    total_credits: Number(driver.wallet?.totalCredits || 0),
+    total_debits: Number(driver.wallet?.totalDebits || 0),
+    updatedAt: driver.wallet?.updatedAt || null,
+  },
+  wallet_balance: Number(driver.wallet?.balance || 0),
   latitude: Number(driver.location?.coordinates?.[1] ?? null),
   longitude: Number(driver.location?.coordinates?.[0] ?? null),
+  // Which way the vehicle is pointing, so the admin map can orient the
+  // marker instead of drawing every driver facing north.
+  heading: driver.heading ?? null,
   approve: Boolean(driver.approve),
   status: driver.status || (driver.approve ? 'approved' : 'pending'),
   active: driver.approve !== false && String(driver.status || '').toLowerCase() !== 'inactive',
@@ -3359,10 +3451,29 @@ export const getAdminModuleInfo = async () => {
   };
 };
 
-export const loginAdmin = async ({ email, password }) => {
-  const admin = await Admin.findOne({ email: email?.trim().toLowerCase() }).select('+password');
+/**
+ * Notes something an admin did, for the Admin Management page.
+ *
+ * Never allowed to break what it records: a failed write is logged and
+ * dropped, so signing in or saving an admin works even if this does not.
+ */
+const recordAdminActivity = (entry) => {
+  AdminActivity.create(entry).catch((error) => {
+    console.error('[admin-activity] not recorded', entry?.type, error?.message);
+  });
+};
+
+const actorOf = (admin) => ({
+  actorId: admin?._id || admin?.id || null,
+  actorName: String(admin?.name || admin?.email || ''),
+});
+
+export const loginAdmin = async ({ email, password, ip = '' }) => {
+  const normalizedEmail = String(email || '').trim().toLowerCase();
+  const admin = await Admin.findOne({ email: normalizedEmail }).select('+password');
 
   if (!admin) {
+    recordAdminActivity({ type: 'login_failed', email: normalizedEmail, ip });
     throw new ApiError(401, 'Invalid admin credentials');
   }
 
@@ -3371,12 +3482,16 @@ export const loginAdmin = async ({ email, password }) => {
     : admin.password === password;
 
   if (!passwordMatches) {
+    recordAdminActivity({ type: 'login_failed', ...actorOf(admin), email: normalizedEmail, ip });
     throw new ApiError(401, 'Invalid admin credentials');
   }
 
   if (admin.active === false || String(admin.status || '').toLowerCase() === 'inactive') {
+    recordAdminActivity({ type: 'login_failed', ...actorOf(admin), email: normalizedEmail, ip });
     throw new ApiError(403, 'Admin account is inactive');
   }
+
+  recordAdminActivity({ type: 'login_success', ...actorOf(admin), email: normalizedEmail, ip });
 
   const [serializedAdmin] = await enrichAdminSummaries([admin]);
 
@@ -3400,8 +3515,14 @@ export const listAdmins = async (currentAdmin) => {
   return enrichAdminSummaries(admins);
 };
 
-const validateSubadminPayload = async (payload = {}, existingAdminId = null) => {
+const validateSubadminPayload = async (payload = {}, existingAdminId = null, currentAdmin = null) => {
   const adminType = normalizeAdminType(payload.admin_type || payload.role);
+  // Only a superadmin can make (or keep making) a superadmin - a sub-admin
+  // with subadmins.manage must not be able to promote anyone, itself included.
+  if (adminType === 'superadmin' && currentAdmin && normalizeAdminType(currentAdmin.admin_type || currentAdmin.role) !== 'superadmin') {
+    throw new ApiError(403, 'Only a superadmin can create or edit a superadmin');
+  }
+  const readOnly = adminType !== 'superadmin' && normalizeBoolean(payload.read_only ?? payload.readOnly ?? false);
   const name = String(payload.name || '').trim();
   const email = String(payload.email || '').trim().toLowerCase();
   const phone = String(payload.phone || '').trim();
@@ -3409,7 +3530,7 @@ const validateSubadminPayload = async (payload = {}, existingAdminId = null) => 
   const permissions = normalizeAdminPermissions(
     adminType === 'superadmin' ? [SUPERADMIN_PERMISSION] : payload.permissions || [],
   );
-  const serviceLocationIds = normalizeObjectIdList(payload.service_location_ids);
+  const requestedLocationIds = normalizeObjectIdList(payload.service_location_ids);
   const zoneIds = normalizeObjectIdList(payload.zone_ids);
   const active = payload.active === undefined ? true : normalizeBoolean(payload.active);
   const status = String(payload.status || (active ? 'active' : 'inactive')).trim().toLowerCase() === 'inactive'
@@ -3433,19 +3554,35 @@ const validateSubadminPayload = async (payload = {}, existingAdminId = null) => 
     throw new ApiError(409, 'Admin email already exists');
   }
 
+  // A location deleted after it was assigned stays on the account, and the form
+  // can't show it to untick, so an edit drops those instead of refusing to save.
+  // Anything else unknown is still an error.
+  const knownLocations = requestedLocationIds.length
+    ? await ServiceLocation.find({ _id: { $in: requestedLocationIds } }).select('_id').lean()
+    : [];
+  const knownLocationIds = new Set(knownLocations.map((item) => String(item._id)));
+  const unknownLocationIds = requestedLocationIds.filter((id) => !knownLocationIds.has(String(id)));
+  if (unknownLocationIds.length > 0) {
+    const current = existingAdminId
+      ? await Admin.findById(existingAdminId).select('service_location_ids').lean()
+      : null;
+    const alreadyAssigned = new Set((current?.service_location_ids || []).map(String));
+    if (unknownLocationIds.some((id) => !alreadyAssigned.has(String(id)))) {
+      throw new ApiError(400, 'One or more selected service locations are invalid');
+    }
+  }
+  const serviceLocationIds = requestedLocationIds.filter((id) => knownLocationIds.has(String(id)));
+
+  if (readOnly && permissions.includes('subadmins.manage')) {
+    throw new ApiError(400, 'A view-only admin cannot manage sub-admins');
+  }
+
   if (adminType === 'subadmin' && permissions.length === 0) {
     throw new ApiError(400, 'Select at least one permission for the subadmin');
   }
 
   if (adminType === 'subadmin' && serviceLocationIds.length === 0) {
     throw new ApiError(400, 'Assign at least one service location to the subadmin');
-  }
-
-  if (serviceLocationIds.length > 0) {
-    const count = await ServiceLocation.countDocuments({ _id: { $in: serviceLocationIds } });
-    if (count !== serviceLocationIds.length) {
-      throw new ApiError(400, 'One or more selected service locations are invalid');
-    }
   }
 
   if (zoneIds.length > 0) {
@@ -3469,6 +3606,7 @@ const validateSubadminPayload = async (payload = {}, existingAdminId = null) => 
     phone,
     role,
     permissions,
+    read_only: readOnly,
     service_location_ids: adminType === 'superadmin' ? [] : serviceLocationIds,
     zone_ids: adminType === 'superadmin' ? [] : zoneIds,
     active,
@@ -3490,10 +3628,18 @@ export const createAdminAccount = async (currentAdmin, payload = {}) => {
     throw new ApiError(400, 'Passwords do not match');
   }
 
-  const validated = await validateSubadminPayload(payload);
+  const validated = await validateSubadminPayload(payload, null, currentAdmin);
   const created = await Admin.create({
     ...validated,
     password: await hashPassword(password),
+  });
+
+  recordAdminActivity({
+    type: 'admin_created',
+    ...actorOf(currentAdmin),
+    targetId: created._id,
+    targetName: created.name,
+    email: created.email,
   });
 
   const [serializedAdmin] = await enrichAdminSummaries([created]);
@@ -3512,7 +3658,22 @@ export const updateAdminAccount = async (currentAdmin, id, payload = {}) => {
     throw new ApiError(400, 'Use your profile flow to update your own admin account');
   }
 
-  const validated = await validateSubadminPayload(payload, admin._id);
+  // Editing an existing superadmin is a superadmin's job too.
+  if (normalizeAdminType(admin.admin_type || admin.role) === 'superadmin'
+    && normalizeAdminType(currentAdmin?.admin_type || currentAdmin?.role) !== 'superadmin') {
+    throw new ApiError(403, 'Only a superadmin can create or edit a superadmin');
+  }
+  const validated = await validateSubadminPayload(payload, admin._id, currentAdmin);
+
+  const before = {
+    permissions: [...(admin.permissions || [])].map(String).sort().join(','),
+    active: admin.active !== false,
+  };
+  const after = {
+    permissions: [...(validated.permissions || [])].map(String).sort().join(','),
+    active: validated.active !== false,
+  };
+
   Object.assign(admin, validated);
 
   if (payload.password) {
@@ -3528,6 +3689,18 @@ export const updateAdminAccount = async (currentAdmin, id, payload = {}) => {
   }
 
   await admin.save();
+
+  const target = { targetId: admin._id, targetName: admin.name, email: admin.email };
+  if (before.active !== after.active) {
+    recordAdminActivity({ type: after.active ? 'admin_reactivated' : 'admin_suspended', ...actorOf(currentAdmin), ...target });
+  }
+  if (before.permissions !== after.permissions) {
+    recordAdminActivity({ type: 'permissions_changed', ...actorOf(currentAdmin), ...target });
+  }
+  if (before.active === after.active && before.permissions === after.permissions) {
+    recordAdminActivity({ type: 'admin_updated', ...actorOf(currentAdmin), ...target });
+  }
+
   const [serializedAdmin] = await enrichAdminSummaries([admin]);
   return serializedAdmin;
 };
@@ -3545,7 +3718,84 @@ export const deleteAdminAccount = async (currentAdmin, id) => {
   }
 
   await Admin.deleteOne({ _id: admin._id });
+  recordAdminActivity({
+    type: 'admin_deleted',
+    ...actorOf(currentAdmin),
+    targetId: admin._id,
+    targetName: admin.name,
+    email: admin.email,
+  });
   return { deleted: true };
+};
+
+/**
+ * The numbers on the Admin Management page, counted from what was recorded.
+ *
+ * Compared against the 30 days before, so the cards can say whether a number
+ * went up or down - the page used to print trends like "+2 from last month"
+ * as fixed text.
+ */
+export const getAdminActivitySummary = async (currentAdmin) => {
+  assertAdminPermission(currentAdmin, 'subadmins.manage', 'subadmins');
+
+  const now = Date.now();
+  const day = 24 * 60 * 60 * 1000;
+  const last30 = new Date(now - 30 * day);
+  const prev30 = new Date(now - 60 * day);
+
+  const countByType = async (from, to) => {
+    const rows = await AdminActivity.aggregate([
+      { $match: { createdAt: { $gte: from, $lt: to } } },
+      { $group: { _id: '$type', count: { $sum: 1 } } },
+    ]);
+    return Object.fromEntries(rows.map((row) => [row._id, row.count]));
+  };
+
+  const [current, previous, signedInToday, failedLast7d, recent, lastSignIns, firstRecord] = await Promise.all([
+    countByType(last30, new Date(now + 1)),
+    countByType(prev30, last30),
+    AdminActivity.distinct('actorId', { type: 'login_success', createdAt: { $gte: new Date(now - day) } }),
+    AdminActivity.countDocuments({ type: 'login_failed', createdAt: { $gte: new Date(now - 7 * day) } }),
+    AdminActivity.find().sort({ createdAt: -1 }).limit(8).lean(),
+    AdminActivity.aggregate([
+      { $match: { type: 'login_success', actorId: { $ne: null } } },
+      { $group: { _id: '$actorId', at: { $max: '$createdAt' } } },
+    ]),
+    AdminActivity.findOne().sort({ createdAt: 1 }).select('createdAt').lean(),
+  ]);
+
+  const summarize = (counts) => {
+    const success = counts.login_success || 0;
+    const failed = counts.login_failed || 0;
+    return {
+      loginSuccess: success,
+      loginFailed: failed,
+      loginSuccessRate: success + failed > 0 ? Math.round((success / (success + failed)) * 1000) / 10 : null,
+      passwordResets: counts.password_reset || 0,
+      permissionChanges: counts.permissions_changed || 0,
+      created: counts.admin_created || 0,
+      suspended: counts.admin_suspended || 0,
+    };
+  };
+
+  return {
+    last30Days: summarize(current),
+    previous30Days: summarize(previous),
+    signedInLast24h: signedInToday.filter(Boolean).length,
+    failedLoginsLast7d: failedLast7d,
+    // When the record starts, so the page can say "since ..." instead of
+    // implying it knows about sign-ins from before it existed.
+    trackingSince: firstRecord?.createdAt || null,
+    lastSignInByAdmin: Object.fromEntries(lastSignIns.map((row) => [String(row._id), row.at])),
+    recent: recent.map((row) => ({
+      id: String(row._id),
+      type: row.type,
+      actorName: row.actorName || '',
+      targetName: row.targetName || '',
+      email: row.email || '',
+      at: row.createdAt,
+    })),
+  };
 };
 
 export const forgotPassword = async (email) => {
@@ -3612,6 +3862,8 @@ export const resetPassword = async ({ email, otp, password }) => {
   admin.resetPasswordOtp = undefined;
   admin.resetPasswordExpires = undefined;
   await admin.save();
+
+  recordAdminActivity({ type: 'password_reset', ...actorOf(admin), email: admin.email });
 
   return { success: true, message: 'Password reset successful' };
 };
@@ -4838,69 +5090,66 @@ export const rejectDriverWithdrawalRequest = async (requestId) => {
 
 export const adjustDriverWallet = async (id, payload = {}) => {
   const amount = Number(payload.amount || 0);
-  if (!Number.isFinite(amount) || amount <= 0) {
-    throw new ApiError(400, 'Amount must be greater than 0');
+  if (!Number.isFinite(amount) || amount < 0) {
+    throw new ApiError(400, 'Amount must be 0 or greater');
   }
 
   const operation = String(payload.operation || 'credit').toLowerCase();
-  if (!['credit', 'debit'].includes(operation)) {
-    throw new ApiError(400, 'Operation must be credit or debit');
+  if (!['credit', 'debit', 'set'].includes(operation)) {
+    throw new ApiError(400, 'Operation must be credit, debit, or set');
   }
 
   const normalizedAmount = Math.round(amount * 100) / 100;
-  const signedAmount = operation === 'credit' ? normalizedAmount : -normalizedAmount;
   const description = payload.description || `Admin adjustment (${operation})`;
-  const session = await mongoose.startSession();
 
-  try {
-    session.startTransaction();
-
-    const driver = await Driver.findById(id).session(session);
-    if (!driver) {
-      throw new ApiError(404, 'Driver not found');
-    }
-
-    const currentBalance = Number(driver.wallet?.balance || 0);
-    const cashLimit = Number(driver.wallet?.cashLimit ?? 500);
-    const nextBalance = Math.round((currentBalance + signedAmount) * 100) / 100;
-    const isBlockedAfter = nextBalance < -cashLimit;
-
-    driver.wallet = driver.wallet || {};
-    driver.wallet.balance = nextBalance;
-    driver.wallet.cashLimit = cashLimit;
-    driver.wallet.isBlocked = isBlockedAfter;
-    driver.markModified('wallet');
-    await driver.save({ session });
-
-    await WalletTransaction.create(
-      [
-        {
-          driverId: id,
-          type: 'adjustment',
-          amount: signedAmount,
-          balanceBefore: currentBalance,
-          balanceAfter: nextBalance,
-          cashLimit,
-          isBlockedAfter,
-          description,
-          metadata: {
-            source: 'admin',
-            operation,
-            rawAmount: normalizedAmount,
-          },
-        },
-      ],
-      { session },
-    );
-
-    await session.commitTransaction();
-    return { balance: Number(nextBalance.toFixed(2)) };
-  } catch (error) {
-    await session.abortTransaction();
-    throw error;
-  } finally {
-    session.endSession();
+  const driver = await Driver.findById(id);
+  if (!driver) {
+    throw new ApiError(404, 'Driver not found');
   }
+
+  const currentBalance = Number(driver.wallet?.balance || 0);
+  const cashLimit = Number(driver.wallet?.cashLimit ?? 500);
+
+  let nextBalance;
+  let signedAmount;
+  if (operation === 'set') {
+    nextBalance = normalizedAmount;
+    signedAmount = Math.round((nextBalance - currentBalance) * 100) / 100;
+  } else if (operation === 'credit') {
+    signedAmount = normalizedAmount;
+    nextBalance = Math.round((currentBalance + signedAmount) * 100) / 100;
+  } else {
+    signedAmount = -normalizedAmount;
+    nextBalance = Math.round((currentBalance + signedAmount) * 100) / 100;
+  }
+
+  const isBlockedAfter = nextBalance < -cashLimit;
+
+  driver.wallet = driver.wallet || {};
+  driver.wallet.balance = nextBalance;
+  driver.wallet.cashLimit = cashLimit;
+  driver.wallet.isBlocked = isBlockedAfter;
+  driver.wallet.updatedAt = new Date();
+  driver.markModified('wallet');
+  await driver.save();
+
+  await WalletTransaction.create({
+    driverId: id,
+    type: 'adjustment',
+    amount: signedAmount,
+    balanceBefore: currentBalance,
+    balanceAfter: nextBalance,
+    cashLimit,
+    isBlockedAfter,
+    description,
+    metadata: {
+      source: 'admin',
+      operation,
+      rawAmount: normalizedAmount,
+    },
+  });
+
+  return { balance: Number(nextBalance.toFixed(2)), driverId: String(driver._id) };
 };
 
 export const listDriverWalletHistory = async (id) => {
@@ -5270,16 +5519,48 @@ export const updateDriver = async (id, payload, currentAdmin = null) => {
     update.registerFor = normalizeDriverRegisterFor(transportTypeValue);
   }
 
-  const vehicleTypeValue = payload.vehicle_type ?? payload.vehicleType ?? payload.car_type;
-  if (vehicleTypeValue !== undefined) {
-    update.vehicleType = String(vehicleTypeValue || '').trim().toLowerCase() || 'car';
+  const serviceCategoriesValue = payload.service_categories ?? payload.serviceCategories;
+  if (serviceCategoriesValue !== undefined) {
+    update.serviceCategories = normalizeDriverServiceCategories(serviceCategoriesValue, update.registerFor || 'taxi');
   }
 
-  const vehicleTypeId =
+  // The cab types the driver gets requests for (ZI Cab AC, Non-AC, Cab + ...).
+  // A list replaces the whole enrolment, first entry primary - the same shape
+  // onboarding saves. The generic family and icon come from the first type, so
+  // an admin correction can't leave the marker or dispatch on the old one.
+  const vehicleTypeIdsValue = payload.vehicle_type_ids ?? payload.vehicleTypeIds;
+  const singleVehicleTypeId =
     payload.vehicle_type_id ?? payload.vehicleTypeId ?? payload.vehicleType?._id ?? payload.vehicleType?.id;
-  if (vehicleTypeId !== undefined) {
-    update.vehicleTypeId =
-      vehicleTypeId && mongoose.isValidObjectId(vehicleTypeId) ? toObjectId(vehicleTypeId) : null;
+  const requestedVehicleTypeIds = Array.isArray(vehicleTypeIdsValue)
+    ? vehicleTypeIdsValue
+    : singleVehicleTypeId !== undefined && singleVehicleTypeId !== null && typeof singleVehicleTypeId !== 'object'
+      ? [singleVehicleTypeId]
+      : null;
+
+  if (requestedVehicleTypeIds) {
+    const ids = [...new Set(requestedVehicleTypeIds.map((value) => String(value || '').trim()).filter(Boolean))];
+    if (!ids.length) {
+      throw new ApiError(400, 'Select at least one vehicle type');
+    }
+    if (ids.some((value) => !mongoose.isValidObjectId(value))) {
+      throw new ApiError(400, 'Invalid vehicle type');
+    }
+    const found = await Vehicle.find({ _id: { $in: ids } }).select('name icon_types').lean();
+    const ordered = ids.map((value) => found.find((item) => String(item._id) === value)).filter(Boolean);
+    if (ordered.length !== ids.length) {
+      throw new ApiError(404, 'Vehicle type not found');
+    }
+    const primary = ordered[0];
+    const family = String(primary.icon_types || primary.name || '').toLowerCase();
+    update.vehicleTypeIds = ordered.map((item) => item._id);
+    update.vehicleTypeId = primary._id;
+    update.vehicleType = family.includes('bike') ? 'bike' : family.includes('auto') ? 'auto' : 'car';
+    update.vehicleIconType = primary.icon_types || update.vehicleType;
+  } else {
+    const vehicleTypeValue = payload.vehicle_type ?? payload.vehicleType ?? payload.car_type;
+    if (vehicleTypeValue !== undefined && typeof vehicleTypeValue !== 'object') {
+      update.vehicleType = String(vehicleTypeValue || '').trim().toLowerCase() || 'car';
+    }
   }
 
   if (payload.vehicle_make !== undefined || payload.vehicleMake !== undefined || payload.car_make !== undefined) {
@@ -5345,12 +5626,73 @@ export const updateDriver = async (id, payload, currentAdmin = null) => {
     update.documents = payload.documents;
   }
 
+  // Admin verification of the driver's OWN payment UPI/QR (the one shown to
+  // riders at ride-end). Accepts 'verified' | 'rejected' | 'pending'. Dot-paths
+  // ensure only these subfields change — account number / IFSC stay untouched.
+  if (payload.paymentUpiVerificationStatus !== undefined) {
+    const upiStatus = String(payload.paymentUpiVerificationStatus || '').trim().toLowerCase();
+    if (!['verified', 'rejected', 'pending', ''].includes(upiStatus)) {
+      throw new ApiError(400, 'paymentUpiVerificationStatus must be verified, rejected, or pending');
+    }
+    update['bankDetails.upiVerificationStatus'] = upiStatus;
+    update['bankDetails.upiVerifiedAt'] = upiStatus === 'verified' ? new Date() : null;
+  }
+
+  // Admin can also EDIT the driver's payment UPI id and/or QR scanner image.
+  // Dot-paths keep account number / IFSC untouched. A data-URL QR is uploaded
+  // to /uploads; an http URL (or empty string to clear) is stored as-is.
+  if (payload.paymentUpiId !== undefined) {
+    update['bankDetails.upiId'] = String(payload.paymentUpiId || '').trim();
+  }
+  if (payload.paymentQrImage !== undefined) {
+    const qr = String(payload.paymentQrImage || '').trim();
+    if (qr.startsWith('data:')) {
+      const uploaded = await uploadDataUrl({
+        dataUrl: qr,
+        folder: 'driver-upi-qr',
+        publicIdPrefix: `driver-upi-${id}`,
+      });
+      update['bankDetails.qrCodeImage'] = uploaded.secureUrl;
+    } else {
+      update['bankDetails.qrCodeImage'] = qr;
+    }
+  }
+
   if (payload.onboarding !== undefined) {
     update.onboarding = payload.onboarding;
   }
 
   const driver = await Driver.findByIdAndUpdate(id, update, { returnDocument: 'after' });
   if (!driver) throw new ApiError(404, 'Driver not found');
+
+  // Approval is the trigger for the one-time joining bonus. Deliberately not
+  // awaited into the failure path of the approval itself: the driver is already
+  // approved by this point, so throwing here would tell the admin the approval
+  // failed when it did not. grantDriverJoiningBonus releases its claim on error,
+  // so the credit is retried the next time approval is saved.
+  if (update.approve === true) {
+    // The plan's free trial comes first. With a trial pass active, the bonus
+    // purchase below finds a pass already running and leaves the bonus in the
+    // wallet as cash - the trial replaces the bonus-bought first pass.
+    await grantFreeTrialIfEligible(driver._id)
+      .catch((error) => console.error('Driver free trial on approval failed', driver._id, error.message));
+
+    const bonusResult = await grantDriverJoiningBonus({ driverId: driver._id, grantedBy: currentAdmin?._id || null })
+      .catch((error) => {
+        console.error('Driver joining bonus failed', driver._id, error.message);
+        return null;
+      });
+
+    // First pass ever is paid from the bonus that was just credited, not
+    // left sitting in the wallet. Same fire-and-forget reasoning as above -
+    // the approval already succeeded.
+    const bonusAmount = Number(bonusResult?.transaction?.amount || 0);
+    if (bonusAmount > 0) {
+      await purchaseDriverSubscriptionFromJoiningBonus({ driverId: driver._id, bonusAmount })
+        .catch((error) => console.error('Driver joining bonus auto-subscription failed', driver._id, error.message));
+    }
+  }
+
   return serializeDriver(driver);
 };
 
@@ -5391,6 +5733,69 @@ export const getDriverById = async (id, currentAdmin = null) => {
     assertServiceLocationAccess(currentAdmin, driver.service_location_id);
   }
   return serializeDriver(driver);
+};
+
+/**
+ * The admin-configured name for each stored document key.
+ *
+ * A driver's documents are stored under the key the app uploaded them with -
+ * `panCard`, `nocFront` - while the admin names the document type separately.
+ * Those two drifted apart: the type named "Insurance" is configured with the
+ * key `panCard`, and "RC" with `nocFront`. Showing the raw key therefore
+ * labelled an insurance paper "Pan Card" on the screen an admin approves
+ * drivers from.
+ *
+ * Built from the configured types, so renaming a document type in the admin
+ * renames it everywhere it is shown.
+ */
+const buildDriverDocumentLabelMap = async () => {
+  const templates = await DriverNeededDocument.find({}, { name: 1, key: 1, front_key: 1, back_key: 1, verification_type: 1 }).lean();
+  const map = new Map();
+
+  for (const template of templates) {
+    const name = String(template.name || '').trim();
+    if (!name) continue;
+
+    for (const key of [template.key, template.front_key, template.back_key]) {
+      const normalized = String(key || '').trim();
+      if (!normalized) continue;
+      // Front and back of the same document are told apart, so a two-sided
+      // document does not show as the same title twice.
+      const isBack = normalized === String(template.back_key || '').trim() && normalized !== String(template.key || '').trim();
+      const isFront = normalized === String(template.front_key || '').trim() && normalized !== String(template.key || '').trim();
+      map.set(normalized.toLowerCase(), {
+        label: isBack ? `${name} (back)` : isFront ? `${name} (front)` : name,
+        // Sent so the screen stops inferring the kind of check from the key:
+        // `panCard` holds the insurance paper here, and guessing made it say
+        // "PAN Verify".
+        verificationType: String(template.verification_type || 'none').trim().toLowerCase(),
+      });
+    }
+  }
+
+  return map;
+};
+
+const labelDriverDocuments = (documents, labels) => {
+  if (!documents || typeof documents !== 'object') return documents;
+
+  const withLabel = (key, value) => {
+    if (!value || typeof value !== 'object') return value;
+    const template = labels.get(String(key || '').trim().toLowerCase());
+    if (!template) return value;
+    return { ...value, label: template.label, verification_type: template.verificationType, hasTemplate: true };
+  };
+
+  if (Array.isArray(documents)) {
+    return documents.map((doc) => withLabel(doc?.fileName || doc?.name, doc));
+  }
+
+  return Object.fromEntries(
+    Object.entries(documents).map(([key, value]) => [
+      key,
+      Array.isArray(value) ? value.map((doc) => withLabel(key, doc)) : withLabel(key, value),
+    ]),
+  );
 };
 
 export const getDriverProfile = async (id) => {
@@ -5459,11 +5864,28 @@ export const getDriverProfile = async (id) => {
   const [lng, lat] = coordinates;
   const hasValidLocation = Number.isFinite(lat) && Number.isFinite(lng) && !(lat === 0 && lng === 0);
 
+  const documentLabels = await buildDriverDocumentLabelMap();
+
+  // Every vehicle type the driver enrolled (they can pick several at
+  // onboarding), primary first.
+  const vehicleTypeIdList = [...new Set(
+    [driver.vehicleTypeId, ...(driver.vehicleTypeIds || [])].filter(Boolean).map(String),
+  )];
+  const vehicleTypeDocs = vehicleTypeIdList.length
+    ? await Vehicle.find({ _id: { $in: vehicleTypeIdList } }).select('name').lean()
+    : [];
+  const vehicleTypeNames = new Map(vehicleTypeDocs.map((item) => [String(item._id), item.name || '']));
+  const vehicleTypes = vehicleTypeIdList
+    .filter((typeId) => vehicleTypeNames.has(typeId))
+    .map((typeId) => ({ id: typeId, name: vehicleTypeNames.get(typeId) }));
+
   return {
     ...serializeDriver(driver),
+    vehicle_types: vehicleTypes,
+    documents: labelDriverDocuments(driver.documents || {}, documentLabels),
     joined_at: driver.createdAt ? new Date(driver.createdAt).toLocaleString('en-IN') : 'N/A',
     vehicle: {
-      type: driver.vehicleType || driver.registerFor || '',
+      type: vehicleTypes.map((item) => item.name).join(', ') || driver.vehicleType || driver.registerFor || '',
       make: driver.vehicleMake || '',
       model: driver.vehicleModel || '',
       color: driver.vehicleColor || '',
@@ -5586,33 +6008,196 @@ export const updateReferralSettings = async (type, payload) => {
   return setting.referral[type];
 };
 
+const REFERRAL_IST_OFFSET_MS = 330 * 60 * 1000;
+
+// Referral sign-ups per calendar month of `year` (Jan..Dec), in IST so a
+// sign-up just after midnight lands in the right month.
+const referralMonthlyCounts = async (Model, year) => {
+  const start = new Date(Date.UTC(year, 0, 1) - REFERRAL_IST_OFFSET_MS);
+  const end = new Date(Date.UTC(year + 1, 0, 1) - REFERRAL_IST_OFFSET_MS);
+  const rows = await Model.aggregate([
+    { $match: { referredBy: { $ne: null }, createdAt: { $gte: start, $lt: end } } },
+    { $group: { _id: { $month: { date: '$createdAt', timezone: '+05:30' } }, count: { $sum: 1 } } },
+  ]);
+  const monthly = Array(12).fill(0);
+  rows.forEach((row) => {
+    if (row._id >= 1 && row._id <= 12) monthly[row._id - 1] = row.count;
+  });
+  return monthly;
+};
+
+// The people who invited the most, with how many of their invitees went on
+// to earn the referral reward.
+const topReferrers = async (Model, limit = 10) => {
+  const rows = await Model.aggregate([
+    { $match: { referredBy: { $ne: null } } },
+    {
+      $group: {
+        _id: '$referredBy',
+        referred: { $sum: 1 },
+        rewarded: { $sum: { $cond: [{ $ifNull: ['$referralRewardGrantedAt', false] }, 1, 0] } },
+        lastReferredAt: { $max: '$createdAt' },
+      },
+    },
+    { $sort: { referred: -1, lastReferredAt: -1 } },
+    { $limit: limit },
+  ]);
+  const people = await Model.find({ _id: { $in: rows.map((row) => row._id) } })
+    .select('name phone referralCode')
+    .lean();
+  const byId = new Map(people.map((person) => [String(person._id), person]));
+
+  return rows.map((row) => {
+    const person = byId.get(String(row._id)) || {};
+    return {
+      id: String(row._id),
+      name: person.name || '',
+      phone: person.phone || '',
+      referral_code: person.referralCode || '',
+      referred: row.referred,
+      rewarded: row.rewarded,
+      last_referred_at: row.lastReferredAt || null,
+    };
+  });
+};
+
+// The latest people who joined with a referral code, and who invited them.
+const recentReferrals = async (Model, kind, limit = 25) => {
+  const referred = await Model.find({ referredBy: { $ne: null } })
+    .sort({ createdAt: -1 })
+    .limit(limit)
+    .select('name phone referredBy referredRideCompletionCount referralRewardGrantedAt createdAt')
+    .populate('referredBy', 'name phone referralCode')
+    .lean();
+
+  return referred.map((person) => ({
+    id: String(person._id),
+    type: kind,
+    name: person.name || '',
+    phone: person.phone || '',
+    joined_at: person.createdAt || null,
+    completed_rides: Number(person.referredRideCompletionCount || 0),
+    reward_granted_at: person.referralRewardGrantedAt || null,
+    referrer: person.referredBy
+      ? {
+          id: String(person.referredBy._id),
+          name: person.referredBy.name || '',
+          phone: person.referredBy.phone || '',
+          referral_code: person.referredBy.referralCode || '',
+        }
+      : null,
+  }));
+};
+
 export const getReferralDashboard = async () => {
-  const [totalDrivers, totalUsers] = await Promise.all([
+  const year = new Date(Date.now() + REFERRAL_IST_OFFSET_MS).getUTCFullYear();
+
+  const [
+    totalDrivers,
+    totalUsers,
+    referredUsers,
+    referredDrivers,
+    rewardedUsers,
+    rewardedDrivers,
+    userMonthly,
+    driverMonthly,
+    driverEarningRows,
+    userEarningRows,
+    userTopReferrers,
+    driverTopReferrers,
+    recentUserReferrals,
+    recentDriverReferrals,
+  ] = await Promise.all([
     Driver.countDocuments(),
     User.countDocuments(),
+    User.countDocuments({ referredBy: { $ne: null } }),
+    Driver.countDocuments({ referredBy: { $ne: null } }),
+    User.countDocuments({ referredBy: { $ne: null }, referralRewardGrantedAt: { $ne: null } }),
+    Driver.countDocuments({ referredBy: { $ne: null }, referralRewardGrantedAt: { $ne: null } }),
+    referralMonthlyCounts(User, year),
+    referralMonthlyCounts(Driver, year),
+    // Every driver referral credit is its own wallet transaction.
+    WalletTransaction.aggregate([
+      { $match: { 'metadata.source': 'driver_referral' } },
+      { $group: { _id: null, total: { $sum: '$amount' } } },
+    ]),
+    // A rider wallet keeps its last 50 transactions, so very old rider
+    // referral credits can have rolled off; this is a floor, not exact.
+    UserWallet.aggregate([
+      { $unwind: '$transactions' },
+      { $match: { 'transactions.referenceKey': { $regex: '^user-referral:' } } },
+      { $group: { _id: null, total: { $sum: '$transactions.amount' } } },
+    ]),
+    topReferrers(User),
+    topReferrers(Driver),
+    recentReferrals(User, 'user'),
+    recentReferrals(Driver, 'driver'),
   ]);
 
-  // Mocking some parts for the dashboard view
+  const driverEarning = Number(driverEarningRows?.[0]?.total || 0);
+  const userEarning = Number(userEarningRows?.[0]?.total || 0);
+  const round2 = (value) => Math.round(value * 100) / 100;
+
   return {
+    year,
     total_drivers: totalDrivers,
     total_users: totalUsers,
-    active_referrals: 0,
-    referral_earning: 0,
+    // Everyone who joined with a referral code, riders and drivers.
+    active_referrals: referredUsers + referredDrivers,
+    referral_earning: round2(driverEarning + userEarning),
     user_referrals: {
-      normal_user: totalUsers,
-      referral_user: 0,
-      monthly: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+      normal_user: Math.max(0, totalUsers - referredUsers),
+      referral_user: referredUsers,
+      rewarded: rewardedUsers,
+      pending: Math.max(0, referredUsers - rewardedUsers),
+      earning: round2(userEarning),
+      monthly: userMonthly,
+      top_referrers: userTopReferrers,
     },
     driver_referrals: {
-      normal_driver: totalDrivers,
-      referral_driver: 0,
-      monthly: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-    }
+      normal_driver: Math.max(0, totalDrivers - referredDrivers),
+      referral_driver: referredDrivers,
+      rewarded: rewardedDrivers,
+      pending: Math.max(0, referredDrivers - rewardedDrivers),
+      earning: round2(driverEarning),
+      monthly: driverMonthly,
+      top_referrers: driverTopReferrers,
+    },
+    recent_referrals: [...recentUserReferrals, ...recentDriverReferrals]
+      .sort((a, b) => new Date(b.joined_at || 0) - new Date(a.joined_at || 0))
+      .slice(0, 30),
   };
 };
 
 export const listSubscriptionPlans = async () =>
   SubscriptionPlan.find({ audience: 'driver' }).sort({ createdAt: -1 }).populate('vehicle_type_id').lean();
+const normalizeVehicleClasses = (value) => {
+  const list = Array.isArray(value) ? value : String(value || '').split(',');
+  return [...new Set(list.map((item) => String(item).trim().toLowerCase()).filter(Boolean))];
+};
+
+const MAX_FREE_TRIAL_DAYS = 365;
+const toFlag = (value) => value === true || ['1', 'true', 'yes', 'on'].includes(String(value ?? '').trim().toLowerCase());
+
+/**
+ * The free-trial switch and its days, checked. A trial that is on must give
+ * at least one whole day; when it is off the days are kept so switching it
+ * back on remembers the last number.
+ */
+const normalizeFreeTrial = (payload, current = {}) => {
+  const enabled = payload.free_trial_enabled !== undefined
+    ? toFlag(payload.free_trial_enabled)
+    : Boolean(current.free_trial_enabled);
+  const rawDays = payload.free_trial_days !== undefined ? payload.free_trial_days : current.free_trial_days;
+  const days = Math.floor(Number(rawDays || 0));
+
+  if (!Number.isFinite(days) || days < 0) throw new ApiError(400, 'Free trial days must be 0 or more');
+  if (days > MAX_FREE_TRIAL_DAYS) throw new ApiError(400, `A free trial can be at most ${MAX_FREE_TRIAL_DAYS} days`);
+  if (enabled && days < 1) throw new ApiError(400, 'Give the free trial at least 1 day');
+
+  return { free_trial_enabled: enabled, free_trial_days: days };
+};
+
 export const createSubscriptionPlan = async (payload) => {
   if (!String(payload?.name || '').trim()) {
     throw new ApiError(400, 'Subscription name is required');
@@ -5620,14 +6205,267 @@ export const createSubscriptionPlan = async (payload) => {
 
   const plan = await SubscriptionPlan.create({
     ...payload,
+    ...normalizeFreeTrial(payload),
     audience: 'driver',
     amount: Number(payload.amount || 0),
-    duration: Number(payload.duration || 0),
+    // A daily pass is one day. Anything else the admin types is respected,
+    // so a weekly pass remains possible without another code change.
+    duration: Number(payload.duration || 1),
+    vehicle_classes: normalizeVehicleClasses(payload.vehicle_classes),
     benefit_type: 'standard',
     ride_limit: 0,
-    active: true,
+    active: payload.active === undefined ? true : Boolean(payload.active),
   });
   return plan.toObject();
+};
+
+// What an admin may change on a driver plan. Anything else in the request
+// (audience, _id, timestamps) is ignored rather than written.
+const EDITABLE_DRIVER_PLAN_FIELDS = [
+  'name', 'description', 'amount', 'duration', 'transport_type', 'vehicle_type_id',
+  'vehicle_classes', 'how_it_works', 'active',
+];
+
+export const updateSubscriptionPlan = async (id, payload = {}) => {
+  const current = await SubscriptionPlan.findOne({ _id: id, audience: 'driver' }).lean();
+  if (!current) throw new ApiError(404, 'Subscription plan not found');
+
+  const update = {};
+  for (const field of EDITABLE_DRIVER_PLAN_FIELDS) {
+    if (payload[field] !== undefined) update[field] = payload[field];
+  }
+  if (update.name !== undefined && !String(update.name || '').trim()) {
+    throw new ApiError(400, 'Subscription name is required');
+  }
+  if (payload.amount !== undefined) update.amount = Number(payload.amount || 0);
+  if (payload.duration !== undefined) update.duration = Number(payload.duration || 1);
+  if (payload.vehicle_classes !== undefined) update.vehicle_classes = normalizeVehicleClasses(payload.vehicle_classes);
+  if (payload.active !== undefined) update.active = toFlag(payload.active);
+  if (payload.free_trial_enabled !== undefined || payload.free_trial_days !== undefined) {
+    Object.assign(update, normalizeFreeTrial(payload, current));
+  }
+
+  const plan = await SubscriptionPlan.findOneAndUpdate(
+    { _id: id, audience: 'driver' },
+    { $set: update },
+    { returnDocument: 'after' },
+  ).lean();
+
+  if (!plan) throw new ApiError(404, 'Subscription plan not found');
+  return plan;
+};
+
+export const deleteSubscriptionPlan = async (id) => {
+  const plan = await SubscriptionPlan.findOneAndDelete({ _id: id, audience: 'driver' }).lean();
+  if (!plan) throw new ApiError(404, 'Subscription plan not found');
+  return plan;
+};
+
+/** Every pass drivers have paid for, newest first - the payment history. */
+export const listDriverSubscriptionPayments = async ({ page = 1, limit = 25, driverId = '', status = '' } = {}) => {
+  const query = { paidAt: { $ne: null } };
+  if (driverId) query.driverId = driverId;
+  if (status === 'active') {
+    query.status = 'active';
+    query.expiresAt = { $gt: new Date() };
+  } else if (status === 'expired') {
+    query.expiresAt = { $lte: new Date() };
+  }
+
+  const pageNumber = Math.max(1, Number(page) || 1);
+  const pageSize = Math.min(100, Math.max(1, Number(limit) || 25));
+
+  const [rows, total] = await Promise.all([
+    DriverSubscription.find(query)
+      .sort({ paidAt: -1 })
+      .skip((pageNumber - 1) * pageSize)
+      .limit(pageSize)
+      .populate('driverId', 'name phone')
+      .lean(),
+    DriverSubscription.countDocuments(query),
+  ]);
+
+  const now = Date.now();
+
+  return {
+    results: rows.map((row) => ({
+      id: String(row._id),
+      driverName: row.driverId?.name || 'Driver',
+      driverPhone: row.driverId?.phone || '',
+      planName: row.planName,
+      amount: row.amount,
+      paymentMethod: row.paymentMethod,
+      paidAt: row.paidAt,
+      startsAt: row.startsAt,
+      expiresAt: row.expiresAt,
+      active: row.status === 'active' && new Date(row.expiresAt).getTime() > now,
+      tripsCovered: row.tripsCovered,
+      commissionWaived: row.commissionWaived,
+    })),
+    total,
+    page: pageNumber,
+    limit: pageSize,
+    // What the passes brought in for the filtered set, since that is the first
+    // question anyone opening this page has.
+    collected: rows.reduce((sum, row) => sum + Number(row.amount || 0), 0),
+  };
+};
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * The new end of a pass an admin is changing:
+ *  - set:   an exact date and time
+ *  - shift: move it by whole days (negative shortens it)
+ *  - end:   now
+ */
+const resolveAdminExpiry = (current, payload = {}) => {
+  const mode = String(payload.mode || '').trim().toLowerCase();
+  const now = new Date();
+
+  if (mode === 'end') return now;
+
+  if (mode === 'set') {
+    const next = new Date(payload.expiresAt);
+    if (!payload.expiresAt || Number.isNaN(next.getTime())) {
+      throw new ApiError(400, 'Pick a valid expiry date');
+    }
+    if (next.getTime() > now.getTime() + 10 * 365 * DAY_MS) {
+      throw new ApiError(400, 'Expiry is too far in the future');
+    }
+    return next;
+  }
+
+  if (mode === 'shift') {
+    const days = Number(payload.days);
+    if (!Number.isInteger(days) || days === 0 || Math.abs(days) > 3650) {
+      throw new ApiError(400, 'Days must be a whole number, like 4 or -2');
+    }
+    // A pass with no end (or one already over) moves from now.
+    const base = current && new Date(current).getTime() > now.getTime() ? new Date(current) : now;
+    return new Date(base.getTime() + days * DAY_MS);
+  }
+
+  throw new ApiError(400, 'mode must be set, shift or end');
+};
+
+const adminEditEntry = (adminId, from, to, note) => ({
+  at: new Date(),
+  by: `admin:${String(adminId || '')}`,
+  from: from || null,
+  to,
+  note: String(note || '').trim().slice(0, 200),
+});
+
+/** Change when a driver's pass ends: extend it, shorten it, or end it now. */
+export const updateDriverSubscriptionExpiry = async (id, payload = {}, adminId = '') => {
+  if (!mongoose.Types.ObjectId.isValid(id)) throw new ApiError(404, 'Pass not found');
+  const pass = await DriverSubscription.findById(id);
+  if (!pass || !pass.paidAt) throw new ApiError(404, 'Pass not found');
+  if (pass.status !== 'active') {
+    throw new ApiError(409, `This pass was ${pass.status} and cannot be changed`);
+  }
+
+  const from = pass.expiresAt;
+  const to = resolveAdminExpiry(from, payload);
+  if (to.getTime() < new Date(pass.startsAt).getTime()) {
+    throw new ApiError(400, 'A pass cannot end before it started');
+  }
+
+  pass.expiresAt = to;
+  // Running again: the driver should hear when this new end comes. Ended:
+  // the expiry sweep sends the usual "your subscription has ended" notice.
+  pass.expiryNotifiedAt = null;
+  pass.adminExpiryEdits.push(adminEditEntry(adminId, from, to, payload.note));
+  await pass.save();
+
+  // The pass waives the wallet minimum, so the block flag follows it.
+  await syncDriverWalletBlockedFlag(pass.driverId).catch((error) =>
+    console.error('Wallet flag sync after pass edit failed', String(pass.driverId), error.message));
+
+  return {
+    id: String(pass._id),
+    expiresAt: pass.expiresAt,
+    active: pass.expiresAt.getTime() > Date.now(),
+  };
+};
+
+/** Change when a rider's plan ends: extend it, shorten it, or end it now. */
+export const updateUserSubscriptionExpiry = async (id, payload = {}, adminId = '') => {
+  if (!mongoose.Types.ObjectId.isValid(id)) throw new ApiError(404, 'Subscription not found');
+  const sub = await UserSubscription.findById(id);
+  if (!sub) throw new ApiError(404, 'Subscription not found');
+  if (sub.status === 'cancelled' || sub.active === false) {
+    throw new ApiError(409, 'This subscription was cancelled and cannot be changed');
+  }
+
+  const from = sub.expiresAt;
+  const to = resolveAdminExpiry(from, payload);
+  if (sub.startedAt && to.getTime() < new Date(sub.startedAt).getTime()) {
+    throw new ApiError(400, 'A plan cannot end before it started');
+  }
+
+  sub.expiresAt = to;
+  const running = to.getTime() > Date.now();
+  const ridesLeft = sub.benefit_type === 'unlimited'
+    || !(Number(sub.ride_limit || 0) > 0 && Number(sub.rides_used || 0) >= Number(sub.ride_limit || 0));
+  if (!running) {
+    sub.status = 'expired';
+  } else if (sub.status === 'expired' && ridesLeft) {
+    sub.status = 'active';
+  }
+  sub.adminExpiryEdits.push(adminEditEntry(adminId, from, to, payload.note));
+  await sub.save();
+
+  return { id: String(sub._id), expiresAt: sub.expiresAt, status: sub.status };
+};
+
+/**
+ * Edit a rider plan. Only people who buy it from now on get the new terms;
+ * plans already bought keep what they paid for (change those one by one).
+ */
+export const updateCustomerSubscriptionPlan = async (id, payload = {}) => {
+  if (!mongoose.Types.ObjectId.isValid(id)) throw new ApiError(404, 'Subscription plan not found');
+  const update = {};
+  if (payload.name !== undefined) {
+    if (!String(payload.name).trim()) throw new ApiError(400, 'Subscription name is required');
+    update.name = String(payload.name).trim();
+  }
+  if (payload.description !== undefined) update.description = String(payload.description || '');
+  if (payload.how_it_works !== undefined) update.how_it_works = String(payload.how_it_works || '');
+  if (payload.amount !== undefined) {
+    const amount = Number(payload.amount);
+    if (!Number.isFinite(amount) || amount < 0) throw new ApiError(400, 'Enter a valid price');
+    update.amount = amount;
+  }
+  if (payload.duration !== undefined) {
+    const duration = Number(payload.duration);
+    if (!Number.isInteger(duration) || duration < 1 || duration > 3650) {
+      throw new ApiError(400, 'Duration must be a whole number of days');
+    }
+    update.duration = duration;
+  }
+  if (payload.vehicle_type_id !== undefined) {
+    if (!mongoose.Types.ObjectId.isValid(payload.vehicle_type_id)) throw new ApiError(400, 'Valid vehicle type is required');
+    update.vehicle_type_id = payload.vehicle_type_id;
+  }
+  if (payload.benefit_type !== undefined) {
+    update.benefit_type = String(payload.benefit_type).trim().toLowerCase() === 'unlimited' ? 'unlimited' : 'limited';
+  }
+  if (update.benefit_type === 'unlimited') {
+    update.ride_limit = 0;
+  } else if (payload.ride_limit !== undefined) {
+    update.ride_limit = Math.max(1, Number(payload.ride_limit || 0));
+  }
+  if (payload.active !== undefined) update.active = Boolean(payload.active);
+
+  const plan = await SubscriptionPlan.findOneAndUpdate(
+    { _id: id, audience: 'user' },
+    { $set: update },
+    { returnDocument: 'after' },
+  ).lean();
+  if (!plan) throw new ApiError(404, 'Subscription plan not found');
+  return plan;
 };
 
 export const listCustomerSubscriptionPlans = async () =>
@@ -5866,6 +6704,20 @@ const formatRidePointLabel = (point, fallback = 'Unknown') => {
   return fallback;
 };
 
+/// How a trip was actually paid, for the Trips page: the method as a badge
+/// key (CASH / ONLINE / WALLET / SUBSCRIPTION) plus a line of detail. The
+/// ride row used to print CASH for every ride, and the others the booking
+/// method, so a cash booking paid online still read "cash".
+const tripPaymentFields = (ride) => {
+  const paid = describeRidePayment(ride);
+  return {
+    paymentOption: paid.method.toUpperCase(),
+    paymentDetail: paid.detail,
+    paymentReference: paid.reference,
+    paymentStatus: paid.status,
+  };
+};
+
 const toAdminRideRow = (ride) => {
   const requestCode = `REQ_${String(ride._id).slice(-12).toUpperCase()}`;
   const status = String(ride.status || '').toLowerCase();
@@ -5892,10 +6744,18 @@ const toAdminRideRow = (ride) => {
     tripStatus,
     rideStatus: ride.status,
     liveStatus: ride.liveStatus,
-    paymentOption: 'CASH',
+    ...tripPaymentFields(ride),
     fare: Number(ride.fare || 0),
-    pickupLabel: formatRidePointLabel(ride.pickupLocation, 'Pickup'),
-    dropLabel: formatRidePointLabel(ride.dropLocation, 'Drop'),
+    // Prefer the human address the customer actually gave. Falling straight to
+    // coordinates showed "12.9716, 77.5946" for website bookings, which carry a
+    // placeholder point because the form has no map — useless to whoever is
+    // calling the customer back.
+    pickupLabel: ride.pickupAddress || formatRidePointLabel(ride.pickupLocation, 'Pickup'),
+    dropLabel: ride.dropAddress || formatRidePointLabel(ride.dropLocation, 'Drop'),
+    pickupAddress: ride.pickupAddress || '',
+    dropAddress: ride.dropAddress || '',
+    scheduledAt: ride.scheduledAt || null,
+    bookingSource: ride.bookingSource || 'app',
     pickupLocation: ride.pickupLocation,
     dropLocation: ride.dropLocation,
     lastDriverLocation: ride.lastDriverLocation || null,
@@ -5943,7 +6803,7 @@ const toAdminDeliveryRow = (ride) => {
     tripStatus,
     rideStatus: ride.status,
     liveStatus: ride.liveStatus,
-    paymentOption: String(ride.paymentMethod || 'cash').toUpperCase(),
+    ...tripPaymentFields(ride),
     fare: Number(ride.fare || 0),
     pickupLabel: ride.pickupAddress || formatRidePointLabel(ride.pickupLocation, 'Pickup'),
     dropLabel: ride.dropAddress || formatRidePointLabel(ride.dropLocation, 'Drop'),
@@ -5953,7 +6813,28 @@ const toAdminDeliveryRow = (ride) => {
       category: parcel.category || '',
       senderName: parcel.senderName || '',
       receiverName: parcel.receiverName || '',
+      // Sender's photos + the driver's pickup/delivery proof, so the admin can
+      // see exactly what was sent and handed over. Read the delivery mirror
+      // first, falling back to the ride's own parcel so photos show even before
+      // the delivery doc has synced.
+      photos: Array.isArray(parcel.photos) && parcel.photos.length
+        ? parcel.photos
+        : (Array.isArray(ride.parcel?.photos) ? ride.parcel.photos : []),
+      // The driver's proof lands on the ride first and is then copied to the
+      // delivery, so read the ride's and fall back to the delivery's.
+      pickupProof: ride.parcel?.pickupProof?.url || parcel.pickupProof?.url || '',
+      deliveryProof: ride.parcel?.deliveryProof?.url || parcel.deliveryProof?.url || '',
+      // When each proof photo was taken, for the Delivery Proof Photos panel.
+      pickupProofAt: ride.parcel?.pickupProof?.at || parcel.pickupProof?.at || null,
+      deliveryProofAt: ride.parcel?.deliveryProof?.at || parcel.deliveryProof?.at || null,
     },
+    // For the row's Customer / Driver details actions.
+    userId: ride.userId?._id ? String(ride.userId._id) : (ride.userId ? String(ride.userId) : ''),
+    driverId: ride.driverId?._id ? String(ride.driverId._id) : (ride.driverId ? String(ride.driverId) : ''),
+    userPhone: ride.userId?.phone || '',
+    driverPhone: ride.driverId?.phone || '',
+    completedAt: ride.completedAt || null,
+    cancelledAt: ride.cancelledAt || null,
   };
 };
 
@@ -5989,13 +6870,16 @@ const toAdminIntercityTripRow = (ride) => {
     tripStatus,
     rideStatus: ride.status,
     liveStatus: ride.liveStatus,
-    paymentOption: String(ride.paymentMethod || 'cash').toUpperCase(),
+    ...tripPaymentFields(ride),
     fare: Number(ride.fare || 0),
     pickupLabel: ride.pickupAddress || formatRidePointLabel(ride.pickupLocation, 'Pickup'),
     dropLabel: ride.dropAddress || formatRidePointLabel(ride.dropLocation, 'Drop'),
     routeLabel: [fromCity, toCity].filter(Boolean).join(' -> '),
     tripType: intercity.tripType || '',
     travelDate: intercity.travelDate || '',
+    // The rider's return date/time for a round trip; blank for one-way.
+    returnDate: intercity.returnDate || '',
+    scheduledAt: ride.scheduledAt || null,
   };
 };
 
@@ -6375,6 +7259,8 @@ const listAdminRides = async ({
   const mongoFilter = {
     ...baseFilter,
     ...buildRideStatusFilter(tab, variant),
+    // Trips an admin deleted stay in the database, out of these lists.
+    adminDeletedAt: null,
   };
 
   const searchClauses = await buildAdminRideSearchClauses(search, {
@@ -6434,15 +7320,40 @@ export const listRideRequests = async (query = {}) => {
 };
 
 export const listDeliveries = async (query = {}) => {
-  return listAdminRides({
-    query,
-    baseFilter: {
-      serviceType: 'parcel',
-    },
-    variant: 'deliveries',
-    serializer: toAdminDeliveryRow,
-    includeParcel: true,
-  });
+  const [list, stats] = await Promise.all([
+    listAdminRides({
+      query,
+      baseFilter: {
+        serviceType: 'parcel',
+      },
+      variant: 'deliveries',
+      serializer: toAdminDeliveryRow,
+      includeParcel: true,
+    }),
+    getDeliveryStats(),
+  ]);
+  return { ...list, stats };
+};
+
+/// Counts for the cards on the Deliveries page, across every delivery - the
+/// page used to work them out from the ten rows on screen, and "today" was
+/// half of those rows.
+const getDeliveryStats = async () => {
+  const base = { serviceType: 'parcel', adminDeletedAt: null };
+  const count = (filter) => Ride.countDocuments({ ...base, ...filter });
+  // Midnight in India, whatever the server's own timezone.
+  const istDay = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
+  const startOfToday = new Date(`${istDay}T00:00:00+05:30`);
+  const [total, completed, cancelled, pending, onTrip, today] = await Promise.all([
+    count({}),
+    count({ status: RIDE_STATUS.COMPLETED }),
+    count({ status: RIDE_STATUS.CANCELLED }),
+    // Booked but no driver has taken it yet.
+    count({ status: RIDE_STATUS.SEARCHING }),
+    count({ status: { $in: [RIDE_STATUS.ACCEPTED, RIDE_STATUS.ONGOING] } }),
+    count({ createdAt: { $gte: startOfToday } }),
+  ]);
+  return { total, completed, cancelled, pending, onTrip, today };
 };
 
 export const listIntercityTrips = async (query = {}) => {
@@ -6455,6 +7366,75 @@ export const listIntercityTrips = async (query = {}) => {
     serializer: toAdminIntercityTripRow,
     includeIntercity: true,
   });
+};
+
+const FINISHED_RIDE_STATUSES = new Set([RIDE_STATUS.COMPLETED, RIDE_STATUS.CANCELLED]);
+
+const loadRideForAdminAction = async (rideId) => {
+  if (!mongoose.Types.ObjectId.isValid(String(rideId))) {
+    throw new ApiError(400, 'Invalid ride id');
+  }
+  const ride = await Ride.findById(rideId).select('status liveStatus adminDeletedAt').lean();
+  if (!ride || ride.adminDeletedAt) {
+    throw new ApiError(404, 'Ride not found');
+  }
+  return ride;
+};
+
+/// Cancels a ride from the admin Trips page: stops the search, frees the
+/// driver and rider, and tells both apps. A finished ride cannot be cancelled.
+export const cancelRideRequestAsAdmin = async (rideId, { reason = '' } = {}, currentAdmin = null) => {
+  if (currentAdmin) {
+    assertAdminPermission(currentAdmin, 'trips.view', 'trips');
+  }
+  const ride = await loadRideForAdminAction(rideId);
+  if (ride.status === RIDE_STATUS.COMPLETED) {
+    throw new ApiError(409, 'A completed trip cannot be cancelled');
+  }
+  if (ride.status === RIDE_STATUS.CANCELLED || ride.liveStatus === RIDE_LIVE_STATUS.CANCELLED) {
+    throw new ApiError(409, 'This trip is already cancelled');
+  }
+
+  const cancelled = await cancelRideByAdmin(rideId);
+  if (!cancelled) {
+    throw new ApiError(404, 'Ride not found');
+  }
+  await Ride.updateOne(
+    { _id: rideId },
+    {
+      $set: {
+        cancelledBy: `admin:${currentAdmin?.name || currentAdmin?.email || 'admin'}`,
+        cancelReason: String(reason || '').trim().slice(0, 300) || 'Cancelled by admin',
+        cancelledAt: new Date(),
+      },
+    },
+  );
+
+  return { id: String(cancelled._id), status: cancelled.status, liveStatus: cancelled.liveStatus };
+};
+
+/// Removes a finished (completed or cancelled) trip from the admin lists. A
+/// live trip must be cancelled first, so deleting can never strand a driver
+/// or rider mid-ride. The record is kept for earnings and reports.
+export const deleteRideRequestAsAdmin = async (rideId, currentAdmin = null) => {
+  if (currentAdmin) {
+    assertAdminPermission(currentAdmin, 'trips.view', 'trips');
+  }
+  const ride = await loadRideForAdminAction(rideId);
+  if (!FINISHED_RIDE_STATUSES.has(ride.status)) {
+    throw new ApiError(409, 'Cancel this trip first - only completed or cancelled trips can be deleted');
+  }
+
+  await Ride.updateOne(
+    { _id: rideId, adminDeletedAt: null },
+    {
+      $set: {
+        adminDeletedAt: new Date(),
+        adminDeletedBy: String(currentAdmin?.name || currentAdmin?.email || 'admin'),
+      },
+    },
+  );
+  return { id: String(rideId), deleted: true };
 };
 
 export const deleteOngoingRide = async (rideId) => {
@@ -6485,7 +7465,7 @@ export const listVehicleTypes = async (queryParams = {}) => {
       : { $in: [normalizedTransportType, 'both'] };
   }
   const items = await Vehicle.find(query)
-    .select('name short_description description transport_type dispatch_type icon_types category delivery_category delivery_distance_pricing service_tax admin_commission_type_from_driver admin_commission_from_driver admin_commission_type_for_owner admin_commission_for_owner capacity image icon map_icon status active createdAt updatedAt')
+    .select('name short_description description transport_type dispatch_type icon_types category delivery_category delivery_distance_pricing service_tax admin_commission_type_from_driver admin_commission_from_driver admin_commission_type_for_owner admin_commission_for_owner capacity image icon map_icon status active app_modules createdAt updatedAt')
     .sort({ createdAt: -1 })
     .lean();
   const results = items.map((item) => ({
@@ -6497,6 +7477,7 @@ export const listVehicleTypes = async (queryParams = {}) => {
     delivery_category: item.delivery_category || '',
     delivery_distance_pricing: normalizeDeliveryDistancePricing(item.delivery_distance_pricing),
     service_tax: normalizeDeliveryServiceTax(item.service_tax),
+    app_modules: Array.isArray(item.app_modules) ? item.app_modules.map(String) : [],
   }));
 
   return {
@@ -6600,15 +7581,84 @@ export const getVehicleTypeById = async (id) => {
   };
 };
 
+/// The driver onboarding category a home-screen module stands for, or null
+/// for modules drivers don't enrol into here (bus, rental).
+const categoryForAppModule = (module = {}) => {
+  const transport = String(module.transport_type || '').toLowerCase();
+  const service = String(module.service_type || '').toLowerCase();
+  if (transport === 'delivery') return 'delivery';
+  if (service === 'outstation') return 'outstation';
+  if (service === 'bus' || service === 'rental') return null;
+  if (/airport/i.test(module.name || '')) return 'airport';
+  if (service === 'pooling') return 'pooling';
+  return 'taxi';
+};
+
 export const listPublicVehicleCatalog = async () => {
   if (publicVehicleCatalogCache.value && publicVehicleCatalogCache.expiresAt > Date.now()) {
     return publicVehicleCatalogCache.value;
   }
 
-  const items = await Vehicle.find()
-    .select('name short_description description transport_type dispatch_type icon_types category delivery_category delivery_distance_pricing service_tax admin_commission_type_from_driver admin_commission_from_driver admin_commission_type_for_owner admin_commission_for_owner capacity image icon map_icon status active')
+  // Only vehicles the admin has left switched on. This feeds the rider app
+  // and the website's fleet, which showed every vehicle regardless - a
+  // switched-off one sat in the ride list unpriced and unbookable. The admin
+  // listing (listVehicleTypes) still returns them all, so one can be
+  // switched back on.
+  const items = await Vehicle.find({ active: { $ne: false }, status: { $nin: [0, '0'] } })
+    .select('name short_description description transport_type dispatch_type icon_types category delivery_category delivery_distance_pricing service_tax admin_commission_type_from_driver admin_commission_from_driver admin_commission_type_for_owner admin_commission_for_owner capacity image icon map_icon status active app_modules')
     .sort({ createdAt: -1 })
     .lean();
+
+  // Per-km rate for the public fleet listing. Ride fares live in SetPrice and
+  // vary by zone, so the lowest active rate is used as a "from" figure; delivery
+  // vehicles price from their own distance config instead. Without this the
+  // catalog carries no price at all, and the website was filling the gap with a
+  // number picked by list position.
+  const ridePriceRows = await SetPrice.aggregate([
+    {
+      $match: {
+        pricing_scope: 'ride',
+        status: 'active',
+        active: 1,
+        vehicle_type: { $ne: null },
+        price_per_distance: { $gt: 0 },
+      },
+    },
+    {
+      $group: {
+        _id: '$vehicle_type',
+        perKm: { $min: '$price_per_distance' },
+        maxPerKm: { $max: '$price_per_distance' },
+      },
+    },
+  ]);
+  const ridePerKm = new Map(
+    ridePriceRows.map((row) => [
+      String(row._id),
+      { perKm: Number(row.perKm) || 0, varies: Number(row.maxPerKm) > Number(row.perKm) },
+    ]),
+  );
+
+  // The apps read dispatch_type to decide whether to offer bidding at all, so
+  // the admin's bidding switches have to reach it here - otherwise turning
+  // bidding off left the toggle sitting in the app doing nothing.
+  const bidRideSettings = await getBidRideSettings();
+
+  // The driver app's onboarding service categories, worked out from the
+  // modules each vehicle is offered under, so a driver can only enrol a
+  // vehicle for what it actually runs (an auto is never outstation).
+  const appModules = await TaxiAppModule.find({ active: { $ne: 0 } })
+    .select('name transport_type service_type')
+    .lean();
+  const moduleCategory = new Map(appModules.map((module) => [String(module._id), categoryForAppModule(module)]));
+  const serviceCategoriesFor = (item) => {
+    const fromModules = (Array.isArray(item.app_modules) ? item.app_modules : [])
+      .map((id) => moduleCategory.get(String(id)))
+      .filter(Boolean);
+    if (fromModules.length) return [...new Set(fromModules)];
+    // No modules set means every module, so everything its transport allows.
+    return item.transport_type === 'delivery' ? ['delivery'] : ['taxi', 'outstation', 'airport'];
+  };
 
   const results = items.map((item) => ({
     id: String(item._id),
@@ -6617,14 +7667,31 @@ export const listPublicVehicleCatalog = async () => {
     short_description: item.short_description || '',
     description: item.description || '',
     transport_type: item.transport_type || 'taxi',
-    dispatch_type: item.dispatch_type || 'normal',
+    dispatch_type: resolveCatalogDispatchType(item, bidRideSettings),
     icon_types: item.icon_types || 'car',
     category: item.category || '',
     delivery_category: item.delivery_category || '',
+    // Which home-screen modules (Zi Airport, Zi City Ride, Zi Parcel, ...)
+    // this vehicle is offered under. Empty means every module — see the
+    // schema comment on Vehicle.app_modules for why.
+    app_modules: Array.isArray(item.app_modules) ? item.app_modules.map(String) : [],
+    service_categories: serviceCategoriesFor(item),
     delivery_distance_pricing: normalizeDeliveryDistancePricing(item.delivery_distance_pricing),
     service_tax: normalizeDeliveryServiceTax(item.service_tax),
     ...normalizeVehicleCommissionConfig(item),
     capacity: Number(item.capacity || 0),
+    // 0 means "no price configured" — callers should omit the price rather than
+    // substitute one.
+    price_per_km:
+      item.transport_type === 'delivery'
+        ? Number(item.delivery_distance_pricing?.distance_price || 0)
+        : ridePerKm.get(String(item._id))?.perKm || 0,
+    // Ride fares are set per zone, so a single figure is a "from" price whenever
+    // the zones disagree. Delivery prices come from one per-vehicle config.
+    price_per_km_varies:
+      item.transport_type === 'delivery'
+        ? false
+        : Boolean(ridePerKm.get(String(item._id))?.varies),
     image: item.image || '',
     map_icon: item.map_icon || item.icon || item.image || '',
     status: item.status ?? 1,
@@ -6665,6 +7732,23 @@ export const listPublicRentalVehicleCatalog = async () => {
 
 export const listVehiclePreferences = async () => {
   return listPreferences();
+};
+
+/// Which home-screen modules a vehicle is offered under.
+///
+/// Ids are stored as plain strings, matching the schema. An empty list means
+/// every module - see the comment on Vehicle.app_modules - so clearing the
+/// picker restores a vehicle to the whole app rather than hiding it.
+const normalizeAppModuleIds = (value) => {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return [...new Set(
+    value
+      .map((entry) => String(entry?._id || entry || '').trim())
+      .filter((entry) => mongoose.Types.ObjectId.isValid(entry)),
+  )];
 };
 
 export const createVehicleType = async (payload) => {
@@ -6715,6 +7799,7 @@ export const createVehicleType = async (payload) => {
     vehicle_preference: Array.isArray(payload.vehicle_preference)
       ? payload.vehicle_preference.filter(Boolean).map(toObjectId)
       : [],
+    app_modules: normalizeAppModuleIds(payload.app_modules),
   });
 
   publicVehicleCatalogCache = { value: null, expiresAt: 0 };
@@ -6810,6 +7895,12 @@ export const updateVehicleType = async (id, payload) => {
       ? payload.vehicle_preference.filter(Boolean).map(toObjectId)
       : [];
   }
+  // The admin panel has always sent this and the server has always dropped it,
+  // so the module picker on the vehicle form saved nothing: every vehicle kept
+  // an empty list and therefore appeared under every module.
+  if (payload.app_modules !== undefined) {
+    vehicle.app_modules = normalizeAppModuleIds(payload.app_modules);
+  }
 
   await vehicle.save();
   publicVehicleCatalogCache = { value: null, expiresAt: 0 };
@@ -6825,7 +7916,9 @@ export const deleteVehicleType = async (id) => {
   return true;
 };
 
-export const listSetPrices = async (queryArgs = {}, currentAdmin = null) => {
+/// `options.hikeMultiplier` overrides the scheduled Price Hike windows - the
+/// rider catalog passes the larger of those and the pickup's automatic surge.
+export const listSetPrices = async (queryArgs = {}, currentAdmin = null, options = {}) => {
   const scope = String(queryArgs.scope || '').trim();
   const query = scope ? { pricing_scope: scope } : {};
   const safePage = Math.max(1, Number(queryArgs.page || queryArgs.current_page || 1) || 1);
@@ -6872,6 +7965,8 @@ export const listSetPrices = async (queryArgs = {}, currentAdmin = null) => {
       'capacity',
       'enable_shared_ride',
       'service_tax',
+      'admin_commision_type',
+      'admin_commision',
       'base_price',
       'base_distance',
       'price_per_distance',
@@ -6879,9 +7974,12 @@ export const listSetPrices = async (queryArgs = {}, currentAdmin = null) => {
       'waiting_charge',
       'free_waiting_before',
       'free_waiting_after',
+      'enable_outstation_ride',
+      'support_outstation',
       'outstation_base_price',
       'outstation_base_distance',
       'outstation_price_per_distance',
+      'outstation_round_trip_price_per_distance',
       'outstation_time_price',
       'createdAt',
       'updatedAt',
@@ -6946,6 +8044,12 @@ export const listSetPrices = async (queryArgs = {}, currentAdmin = null) => {
         : (item.payment_type ? String(item.payment_type).split(',') : ['cash', 'online', 'wallet']),
       status: item.status || (item.active === false ? 'inactive' : 'active'),
       service_tax: Number(item.service_tax ?? 0),
+      // The per-ride fee charged to the rider on top of the trip - the client's
+      // "admin charges" (platform support + third party + GST). Kept in the
+      // admin_commision pair the Set Prices screen already edits as customer
+      // commission, where 1 means a percentage and anything else a fixed sum.
+      rider_platform_fee: Number(item.admin_commision ?? 0),
+      rider_platform_fee_type: Number(item.admin_commision_type ?? 1) === 1 ? 'percentage' : 'fixed',
       base_price: Number(item.base_price ?? 0),
       base_distance: Number(item.base_distance ?? 0),
       price_per_distance: Number(item.price_per_distance ?? 0),
@@ -6953,9 +8057,16 @@ export const listSetPrices = async (queryArgs = {}, currentAdmin = null) => {
       waiting_charge: Number(item.waiting_charge ?? 0),
       free_waiting_before: Number(item.free_waiting_before ?? 0),
       free_waiting_after: Number(item.free_waiting_after ?? 0),
+      // Whether this vehicle may be booked for an intercity trip at all. The
+      // apps read exactly these two keys and the catalog never sent them, so
+      // every vehicle looked city-only and the Outstation screen was always
+      // empty - even where an admin had enabled it and set rates.
+      enable_outstation_ride: Boolean(item.enable_outstation_ride),
+      support_outstation: Number(item.support_outstation ?? 0),
       outstation_base_price: Number(item.outstation_base_price ?? 0),
       outstation_base_distance: Number(item.outstation_base_distance ?? 0),
       outstation_price_per_distance: Number(item.outstation_price_per_distance ?? 0),
+      outstation_round_trip_price_per_distance: Number(item.outstation_round_trip_price_per_distance ?? 0),
       outstation_time_price: Number(item.outstation_time_price ?? 0),
       updatedAt: item.updatedAt,
     };
@@ -7042,14 +8153,22 @@ export const listSetPrices = async (queryArgs = {}, currentAdmin = null) => {
     }
 
     if (normalizedZoneId) {
-      const rowZoneId = String(
+      // From the real _id only. `zone.id` is built as String(zone._id) off a
+      // `zone_id || {}` fallback, so a row with no zone carries the literal
+      // string "undefined" there - which reads as a zone and made every
+      // no-zone row vanish from a zone_id=none query.
+      const rawZoneId =
         row.paginatorItem?.zone?._id ||
-        row.paginatorItem?.zone?.id ||
         row.paginatorItem?.zone_id?._id ||
-        row.paginatorItem?.zone_id ||
-        '',
-      );
-      if (rowZoneId !== normalizedZoneId) {
+        row.paginatorItem?.zone_id;
+      const rowZoneId = rawZoneId ? String(rawZoneId) : '';
+      // 'none' asks for the rows that belong to no zone - the service-location
+      // and global fallbacks the rider catalog cascades to.
+      if (normalizedZoneId === 'none') {
+        if (rowZoneId) {
+          return false;
+        }
+      } else if (rowZoneId !== normalizedZoneId) {
         return false;
       }
     }
@@ -7093,8 +8212,27 @@ export const listSetPrices = async (queryArgs = {}, currentAdmin = null) => {
   const from = total === 0 ? 0 : (safePage - 1) * safeLimit + 1;
   const to = total === 0 ? 0 : Math.min((safePage - 1) * safeLimit + pagedRows.length, total);
 
+  // Surge is applied to the rows riders are quoted from, and only to those:
+  // admins (currentAdmin set) see and edit the base tariff. The quote is what
+  // createRideRecord bills, so scaling it scales the charge.
+  //
+  // The multiplier is the pickup hexagon's automatic surge, passed in by the
+  // rider catalog. A request with no pickup has no area to surge, so 1. The
+  // scheduled Price Hike time slots are retired - surge follows demand only.
+  //
+  // Surge is set per vehicle type, so `options.multiplierForVehicle(id)` gives
+  // each row its own; `options.hikeMultiplier` is one value for every row.
+  const hikeMultiplier = Number(options.hikeMultiplier) > 0 ? Number(options.hikeMultiplier) : 1;
+  const rowMultiplier = (row) => (typeof options.multiplierForVehicle === 'function'
+    ? Number(options.multiplierForVehicle(setPriceVehicleId(row))) || 1
+    : hikeMultiplier);
+  const quotedResults = currentAdmin
+    ? pagedRows.map((row) => row.result)
+    : pagedRows.map((row) => applyPriceHikeToSetPrice(row.result, rowMultiplier(row.result)));
+
   return {
-    results: pagedRows.map((row) => row.result),
+    results: quotedResults,
+    price_hike_multiplier: hikeMultiplier,
     paginator: {
       ...paginated.paginator,
       data: pagedRows.map((row) => row.paginatorItem),
@@ -7257,6 +8395,7 @@ export const createSetPrice = async (payload, currentAdmin = null) => {
     outstation_base_price: Number(payload.outstation_base_price ?? 0),
     outstation_base_distance: Number(payload.outstation_base_distance ?? 0),
     outstation_price_per_distance: Number(payload.outstation_price_per_distance ?? 0),
+    outstation_round_trip_price_per_distance: Number(payload.outstation_round_trip_price_per_distance ?? 0),
     outstation_time_price: Number(payload.outstation_time_price ?? 0),
     free_waiting_before: Number(payload.free_waiting_before ?? 0),
     free_waiting_after: Number(payload.free_waiting_after ?? 0),
@@ -7278,6 +8417,7 @@ export const createSetPrice = async (payload, currentAdmin = null) => {
     status: payload.status || 'active',
   });
 
+  publicVehicleCatalogCache = { value: null, expiresAt: 0 };
   return setPrice.toObject();
 };
 
@@ -7303,7 +8443,7 @@ export const updateSetPrice = async (id, payload, currentAdmin = null) => {
     'enable_airport_ride', 'enable_outstation_ride',
     'base_price', 'base_distance', 'price_per_distance', 'time_price',
     'waiting_charge', 'outstation_base_price', 'outstation_base_distance',
-    'outstation_price_per_distance', 'outstation_time_price',
+    'outstation_price_per_distance', 'outstation_round_trip_price_per_distance', 'outstation_time_price',
     'free_waiting_before', 'free_waiting_after',
     'enable_shared_ride', 'enable_ride_sharing', 'price_per_seat',
     'shared_price_per_distance', 'shared_cancel_fee',
@@ -7328,6 +8468,7 @@ export const updateSetPrice = async (id, payload, currentAdmin = null) => {
     'outstation_base_price',
     'outstation_base_distance',
     'outstation_price_per_distance',
+    'outstation_round_trip_price_per_distance',
     'outstation_time_price',
     'free_waiting_before',
     'free_waiting_after',
@@ -7418,6 +8559,7 @@ export const updateSetPrice = async (id, payload, currentAdmin = null) => {
   }
 
   await setPrice.save();
+  publicVehicleCatalogCache = { value: null, expiresAt: 0 };
   return setPrice.toObject();
 };
 
@@ -7434,6 +8576,7 @@ export const deleteSetPrice = async (id, currentAdmin = null) => {
   }
   const deleted = await SetPrice.findByIdAndDelete(id);
   if (!deleted) throw new ApiError(404, 'Set Price not found');
+  publicVehicleCatalogCache = { value: null, expiresAt: 0 };
   return true;
 };
 
@@ -8036,6 +9179,66 @@ const groupAdminEarnings = (rows, keyGetter, labelGetter) => {
     .sort((a, b) => b.adminCommission - a.adminCommission);
 };
 
+const dateMatch = (startDate, endDate) => {
+  const range = {};
+  if (startDate) range.$gte = startDate;
+  if (endDate) range.$lte = endDate;
+  return range;
+};
+
+/// Money figures that do not come from rides: driver subscription passes sold,
+/// refunds credited to riders, withdrawals drivers are waiting on, and what
+/// sits in driver wallets. Zone and vehicle filters do not apply to these.
+const getAdminEarningExtras = async ({ startDate, endDate }) => {
+  const range = dateMatch(startDate, endDate);
+  const [subscriptions, refunds, pending, wallets] = await Promise.all([
+    DriverSubscription.aggregate([
+      { $match: { paidAt: { $ne: null, ...range } } },
+      { $group: { _id: null, amount: { $sum: '$amount' }, count: { $sum: 1 } } },
+    ]),
+    UserWallet.aggregate([
+      { $unwind: '$transactions' },
+      {
+        $match: {
+          'transactions.kind': 'credit',
+          'transactions.title': /refund/i,
+          ...(Object.keys(range).length ? { 'transactions.createdAt': range } : {}),
+        },
+      },
+      { $group: { _id: null, amount: { $sum: '$transactions.amount' }, count: { $sum: 1 } } },
+    ]),
+    // Every withdrawal by status. A pending request is owed now, whenever it
+    // was made, so these are not limited to the date range.
+    WithdrawalRequest.aggregate([
+      { $group: { _id: '$status', amount: { $sum: '$amount' }, count: { $sum: 1 } } },
+    ]),
+    Driver.aggregate([
+      { $match: { 'wallet.balance': { $gt: 0 } } },
+      { $group: { _id: null, amount: { $sum: '$wallet.balance' } } },
+    ]),
+  ]);
+  const money = (value) => Number(Number(value || 0).toFixed(2));
+  const byStatus = (...statuses) => pending
+    .filter((row) => statuses.includes(String(row._id || '').toLowerCase()))
+    .reduce((acc, row) => ({ amount: acc.amount + Number(row.amount || 0), count: acc.count + row.count }), { amount: 0, count: 0 });
+  const waiting = byStatus('pending', 'processing', 'approved');
+  const paid = byStatus('completed', 'paid', 'success');
+  const failed = byStatus('rejected', 'failed', 'declined', 'cancelled');
+  return {
+    withdrawalsPaid: money(paid.amount),
+    withdrawalsPaidCount: paid.count,
+    withdrawalsFailed: money(failed.amount),
+    withdrawalsFailedCount: failed.count,
+    subscriptionRevenue: money(subscriptions[0]?.amount),
+    subscriptionCount: subscriptions[0]?.count || 0,
+    refunds: money(refunds[0]?.amount),
+    refundCount: refunds[0]?.count || 0,
+    pendingSettlements: money(waiting.amount),
+    pendingSettlementCount: waiting.count,
+    driverWalletHeld: money(wallets[0]?.amount),
+  };
+};
+
 export const getAdminEarnings = async (query = {}) => {
   const {
     from,
@@ -8102,7 +9305,11 @@ export const getAdminEarnings = async (query = {}) => {
         driverName: driver.name || 'Unassigned Driver',
         driverPhone: driver.phone || '',
         riderType: ride.serviceType || 'ride',
-        paymentMethod: ride.paymentMethod || 'cash',
+        // How it was actually paid - a cash booking paid online at the end
+        // counts as online, which the booking method alone got wrong.
+        paymentMethod: describeRidePayment(ride).method,
+        paymentDetail: describeRidePayment(ride).detail,
+        driverId: driver?._id ? String(driver._id) : '',
         zoneId: zoneDoc?._id ? String(zoneDoc._id) : '',
         zoneName: zoneDoc?.name || 'Unmapped Zone',
         vehicleId: vehicleDoc?._id ? String(vehicleDoc._id) : '',
@@ -8165,10 +9372,27 @@ export const getAdminEarnings = async (query = {}) => {
     Object.entries(totals).map(([key, value]) => [key, typeof value === 'number' ? Number(value.toFixed(2)) : value]),
   );
 
+  // The cards that were estimates in the browser (5% / 1.5% / 8% of other
+  // figures) now come from the records themselves.
+  const extras = await getAdminEarningExtras({ startDate, endDate });
+  const netPlatformRevenue = roundedTotals.adminCommission + extras.subscriptionRevenue - extras.refunds;
+
   return {
     summary: {
       ...roundedTotals,
       averageCommission: rows.length ? Number((totals.adminCommission / rows.length).toFixed(2)) : 0,
+      subscriptionRevenue: extras.subscriptionRevenue,
+      subscriptionCount: extras.subscriptionCount,
+      refunds: extras.refunds,
+      refundCount: extras.refundCount,
+      netPlatformRevenue: Number(netPlatformRevenue.toFixed(2)),
+      pendingSettlements: extras.pendingSettlements,
+      pendingSettlementCount: extras.pendingSettlementCount,
+      driverWalletHeld: extras.driverWalletHeld,
+      withdrawalsPaid: extras.withdrawalsPaid,
+      withdrawalsPaidCount: extras.withdrawalsPaidCount,
+      withdrawalsFailed: extras.withdrawalsFailed,
+      withdrawalsFailedCount: extras.withdrawalsFailedCount,
     },
     breakdowns: {
       zones: groupAdminEarnings(rows, (row) => row.zoneId, (row) => row.zoneName),
@@ -8188,9 +9412,111 @@ export const getAdminEarnings = async (query = {}) => {
   };
 };
 
+/**
+ * The numbers on the dashboard that describe this moment rather than the day.
+ *
+ * Kept out of the 60-second snapshot cache: a minute-old count of who is
+ * online is not a live count, and these are four cheap counts.
+ *
+ * Riders are counted from their socket connections, since - unlike drivers -
+ * a rider has no online flag to read. Every socket joins a room named after
+ * its owner, so counting distinct participant rooms counts people rather than
+ * open tabs. fetchSockets() goes through the Redis adapter, so it sees all
+ * four API processes, not just the one answering this request.
+ */
+const getLiveDashboardStats = async () => {
+  // Whether each dependency is actually answering, rather than a panel of
+  // hardcoded green "Operational" labels that stayed green during an outage.
+  const checkSystemHealth = async () => {
+    const io = getSocketServer();
+    const mongoState = mongoose.connection?.readyState; // 1 = connected
+    const redis = getRedisStatus();
+    const mapSettings = await getMapSettings().catch(() => null);
+    const mapApis = mapSettings?.settings || {};
+    const mapKey = mapApis.google_map_key_for_web_apps || mapApis.google_map_key_for_distance_matrix;
+
+    return {
+      database: mongoState === 1 ? 'operational' : 'down',
+      socket: io ? 'connected' : 'down',
+      redis: !redis.configured ? 'not configured' : redis.ready ? 'healthy' : 'down',
+      maps: mapKey ? 'operational' : 'not configured',
+    };
+  };
+
+  const countConnectedRiders = async () => {
+    const io = getSocketServer();
+    if (!io) return 0;
+
+    const sockets = await io.in(getSupportRoleRoom('user')).fetchSockets();
+    const riders = new Set();
+
+    for (const socket of sockets) {
+      for (const room of socket.rooms) {
+        if (String(room).startsWith('chat:participant:user:')) riders.add(room);
+      }
+    }
+
+    return riders.size;
+  };
+
+  const [
+    onlineCustomers,
+    onlineDrivers,
+    driversOnTrip,
+    ongoingTrips,
+    pendingApprovals,
+    systemHealth,
+    sosActive,
+    sosResolved,
+    driverPositions,
+  ] = await Promise.all([
+    countConnectedRiders().catch(() => 0),
+    Driver.countDocuments({ isOnline: true }),
+    Driver.countDocuments({ isOnRide: true }),
+    // A trip someone is sitting in right now: a driver is assigned and it has
+    // neither finished nor been called off. 'searching' is not one - nobody
+    // has accepted it yet.
+    Ride.countDocuments({ status: { $in: [RIDE_STATUS.ACCEPTED, RIDE_STATUS.ONGOING] } }),
+    // There is no 'rejected' state for a driver: approve is false until an
+    // admin approves them, so these are the ones still waiting.
+    Driver.countDocuments({ approve: false }),
+    checkSystemHealth().catch(() => ({})),
+    // The real SOS button, from the safety module. The panel used to show
+    // support-ticket counts under an "SOS Response Center" heading.
+    SafetyAlert.countDocuments({ status: 'active' }),
+    SafetyAlert.countDocuments({ status: 'resolved' }),
+    // Where the online drivers actually are, for the map that claimed to show
+    // "live fleet positions" while dropping a single pin on the middle of India.
+    Driver.find(
+      { isOnline: true, 'location.coordinates.0': { $exists: true } },
+      { name: 1, isOnRide: 1, vehicleType: 1, location: 1 },
+    ).limit(500).lean(),
+  ]);
+
+  return {
+    onlineCustomers,
+    onlineDrivers,
+    driversOnTrip,
+    ongoingTrips,
+    pendingApprovals,
+    systemHealth,
+    sos: { active: sosActive, resolved: sosResolved },
+    driverPositions: driverPositions.map((driver) => ({
+      id: String(driver._id),
+      name: driver.name || 'Driver',
+      onTrip: Boolean(driver.isOnRide),
+      vehicleType: driver.vehicleType || '',
+      lng: driver.location?.coordinates?.[0],
+      lat: driver.location?.coordinates?.[1],
+    })),
+  };
+};
+
 export const getDashboardData = async () => {
+  const live = await getLiveDashboardStats();
+
   if (dashboardCache.value && dashboardCache.expiresAt > Date.now()) {
-    return dashboardCache.value;
+    return { ...dashboardCache.value, live };
   }
 
   const [totalUsers, totalDrivers, totalOwners, approvedDrivers, rides, supportTicketStats] = await Promise.all([
@@ -8413,6 +9739,40 @@ export const getDashboardData = async () => {
       noDriver: cancelledRides.filter((ride) => !ride?.driverId).length,
       chart: cancelChartSeries,
     },
+    // The drivers who actually completed the most trips, for the leaderboard
+    // that used to list four invented partners ("Rydon Driver Node A").
+    topDrivers: await (async () => {
+      const tripsByDriver = new Map();
+
+      for (const ride of completedRides) {
+        if (!ride?.driverId) continue;
+        const key = String(ride.driverId);
+        tripsByDriver.set(key, (tripsByDriver.get(key) || 0) + 1);
+      }
+
+      const ranked = [...tripsByDriver.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5);
+      if (ranked.length === 0) return [];
+
+      const drivers = await Driver.find(
+        { _id: { $in: ranked.map(([id]) => id) } },
+        { name: 1, rating: 1, isOnline: 1 },
+      ).lean();
+      const byId = new Map(drivers.map((driver) => [String(driver._id), driver]));
+
+      return ranked
+        .map(([id, trips]) => {
+          const driver = byId.get(id);
+          if (!driver) return null;
+          return {
+            id,
+            name: driver.name || 'Driver',
+            rating: Number(driver.rating || 0),
+            trips,
+            online: Boolean(driver.isOnline),
+          };
+        })
+        .filter(Boolean);
+    })(),
     performance_index: rides.length
       ? Number((((completedRides.length || 0) / rides.length) * 100).toFixed(1))
       : 0,
@@ -8423,7 +9783,7 @@ export const getDashboardData = async () => {
     value: snapshot,
   };
 
-  return snapshot;
+  return { ...snapshot, live };
 };
 
 export const getOverallEarnings = async () => (await getDashboardData()).overallEarnings;
@@ -11017,6 +12377,7 @@ const businessSettingsCategoryMap = {
   customize: 'customization',
   'transport-ride': 'transport_ride',
   'bid-ride': 'bid_ride',
+  'driver-subscription': 'driver_subscription',
   general: 'general',
   'user-home-management': 'user_home_settings',
 };
@@ -11024,6 +12385,98 @@ const businessSettingsCategoryMap = {
 const appSettingsCategoryMap = {
   wallet: 'wallet_setting',
   tip: 'tip_setting',
+  'ride-voice': 'ride_voice',
+};
+
+/// Voice config is read by the rider app on every trip, so it must answer with
+/// something usable even on an install whose settings document predates the
+/// feature (the stored section is then simply absent). Merging the shipped
+/// defaults underneath what the admin saved gives that guarantee, and also
+/// means an admin who edits only the Hindi wording does not silently blank the
+/// English and Kannada ones.
+const mergeRideVoiceSettings = (stored) => {
+  const defaults = createDefaultRideVoiceSettings();
+  const saved = stored && typeof stored === 'object' ? stored : {};
+
+  const mergeSection = (key) => ({
+    ...defaults[key],
+    ...(saved[key] || {}),
+    messages: {
+      ...defaults[key].messages,
+      ...((saved[key] || {}).messages || {}),
+    },
+  });
+
+  return {
+    ...defaults,
+    ...saved,
+    welcome: mergeSection('welcome'),
+    comfort: mergeSection('comfort'),
+    arrival: mergeSection('arrival'),
+    speech: { ...defaults.speech, ...(saved.speech || {}) },
+  };
+};
+
+/// Keeps a saved voice config inside sane bounds.
+///
+/// The templates are free text by design (they are localized sentences), but
+/// the numbers drive timers on the rider's phone, so an accidental `""` or a
+/// negative delay must not reach the app.
+const sanitizeRideVoiceSettings = (payload) => {
+  const defaults = createDefaultRideVoiceSettings();
+  const input = payload && typeof payload === 'object' ? payload : {};
+
+  const bool = (value, fallback) => {
+    if (value === undefined || value === null || value === '') return fallback;
+    if (typeof value === 'boolean') return value;
+    return !['0', 'false', 'no', 'off'].includes(String(value).trim().toLowerCase());
+  };
+
+  const number = (value, fallback, { min, max }) => {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return fallback;
+    return Math.min(max, Math.max(min, parsed));
+  };
+
+  /// Drops non-string entries rather than storing them: the app calls
+  /// `.replace()` on these and a number or object would throw there.
+  const messages = (value, fallback) => {
+    if (!value || typeof value !== 'object') return fallback;
+    const cleaned = {};
+    for (const [code, text] of Object.entries(value)) {
+      const key = String(code || '').trim().toLowerCase();
+      if (!key) continue;
+      if (typeof text !== 'string') continue;
+      if (!text.trim()) continue;
+      cleaned[key] = text.trim();
+    }
+    return Object.keys(cleaned).length ? cleaned : fallback;
+  };
+
+  const section = (key, triggerKey, bounds) => {
+    const saved = input[key] && typeof input[key] === 'object' ? input[key] : {};
+    return {
+      enabled: bool(saved.enabled, defaults[key].enabled),
+      [triggerKey]: number(saved[triggerKey], defaults[key][triggerKey], bounds),
+      messages: messages(saved.messages, defaults[key].messages),
+    };
+  };
+
+  const speech = input.speech && typeof input.speech === 'object' ? input.speech : {};
+
+  return {
+    enabled: bool(input.enabled, defaults.enabled),
+    fallback_language:
+      String(input.fallback_language || defaults.fallback_language).trim().toLowerCase() || 'en',
+    welcome: section('welcome', 'delay_minutes', { min: 0, max: 120 }),
+    comfort: section('comfort', 'delay_minutes', { min: 0, max: 120 }),
+    arrival: section('arrival', 'trigger_remaining_minutes', { min: 1, max: 120 }),
+    speech: {
+      rate: number(speech.rate, defaults.speech.rate, { min: 0.1, max: 1 }),
+      pitch: number(speech.pitch, defaults.speech.pitch, { min: 0.5, max: 2 }),
+      volume: number(speech.volume, defaults.speech.volume, { min: 0, max: 1 }),
+    },
+  };
 };
 
 const generalBusinessSettingsProjection = {
@@ -11078,6 +12531,14 @@ const getProjectedSettingsSection = async (Model, defaultFactory, key) => {
 
 export const getGeneralSettings = async (category) => {
   const appKey = appSettingsCategoryMap[category];
+  if (appKey === 'ride_voice') {
+    return {
+      settings: mergeRideVoiceSettings(
+        await getProjectedSettingsSection(AdminAppSetting, createDefaultAppSettings, 'ride_voice'),
+      ),
+    };
+  }
+
   if (appKey) {
     return {
       settings: await getProjectedSettingsSection(
@@ -11109,6 +12570,16 @@ export const updateGeneralSettings = async (category, payload) => {
   const appSettings = await ensureAppSettings();
 
   const newValues = payload.settings || payload;
+
+  if (appSettingsCategoryMap[category] === 'ride_voice') {
+    // Replaced wholesale rather than shallow-merged: the panel always posts the
+    // complete config, and a merge would make a deleted language impossible to
+    // remove.
+    appSettings.ride_voice = sanitizeRideVoiceSettings(newValues);
+    appSettings.markModified('ride_voice');
+    await appSettings.save();
+    return { settings: appSettings.ride_voice };
+  }
 
   if (appSettingsCategoryMap[category]) {
     const key = appSettingsCategoryMap[category];
@@ -11318,4 +12789,316 @@ export const seedTransportTypes = async () => {
     }
   }
   return results;
+};
+
+// ── Price hike (surge) ───────────────────────────────────────────────────────
+
+const serializePriceHike = (item) => ({
+  id: String(item._id),
+  label: item.label || '',
+  days: Array.isArray(item.days) ? item.days : [],
+  start_time: item.startTime || '00:00',
+  end_time: item.endTime || '00:00',
+  timezone: item.timezone || 'Asia/Kolkata',
+  multiplier: Number(item.multiplier ?? 1),
+  active: Boolean(item.active),
+  updatedAt: item.updatedAt,
+});
+
+const normalizePriceHikePayload = (payload = {}) => {
+  const time = (value, fallback) => {
+    const match = /^(\d{1,2}):(\d{2})$/.exec(String(value || '').trim());
+    if (!match) return fallback;
+    const hour = Number(match[1]);
+    const minute = Number(match[2]);
+    if (hour > 23 || minute > 59) return fallback;
+    return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+  };
+
+  const multiplier = Number(payload.multiplier);
+
+  return {
+    label: String(payload.label || '').trim(),
+    days: Array.isArray(payload.days)
+      ? [...new Set(payload.days.map((day) => Number(day)).filter((day) => day >= 0 && day <= 6))]
+      : [],
+    startTime: time(payload.start_time ?? payload.startTime, '00:00'),
+    endTime: time(payload.end_time ?? payload.endTime, '00:00'),
+    timezone: String(payload.timezone || 'Asia/Kolkata').trim() || 'Asia/Kolkata',
+    multiplier: Number.isFinite(multiplier) && multiplier >= 1 ? multiplier : 1,
+    active: normalizeBoolean(payload.active ?? false),
+  };
+};
+
+export const listPriceHikes = async (currentAdmin = null) => {
+  if (currentAdmin) {
+    assertAdminPermission(currentAdmin, 'set_prices.view', 'price hikes');
+  }
+
+  const items = await PriceHike.find({}).sort({ createdAt: -1 }).lean();
+
+  return {
+    results: items.map(serializePriceHike),
+    active_multiplier: await getActivePriceHikeMultiplier(),
+  };
+};
+
+export const createPriceHike = async (payload, currentAdmin = null) => {
+  if (currentAdmin) {
+    assertAdminPermission(currentAdmin, 'set_prices.view', 'price hikes');
+  }
+
+  const data = normalizePriceHikePayload(payload);
+
+  if (data.startTime === data.endTime) {
+    throw new ApiError(400, 'Start and end time cannot be the same');
+  }
+
+  const item = await PriceHike.create(data);
+  return serializePriceHike(item.toObject());
+};
+
+export const updatePriceHike = async (id, payload, currentAdmin = null) => {
+  if (currentAdmin) {
+    assertAdminPermission(currentAdmin, 'set_prices.view', 'price hikes');
+  }
+
+  const existing = await PriceHike.findById(id);
+  if (!existing) {
+    throw new ApiError(404, 'Price hike not found');
+  }
+
+  // A toggle sends only { active }, so merge onto the stored row rather than
+  // normalising a partial payload into defaults and wiping the schedule.
+  const data = normalizePriceHikePayload({ ...serializePriceHike(existing.toObject()), ...payload });
+
+  if (data.startTime === data.endTime) {
+    throw new ApiError(400, 'Start and end time cannot be the same');
+  }
+
+  const item = await PriceHike.findByIdAndUpdate(id, data, { returnDocument: 'after' }).lean();
+  return serializePriceHike(item);
+};
+
+export const deletePriceHike = async (id, currentAdmin = null) => {
+  if (currentAdmin) {
+    assertAdminPermission(currentAdmin, 'set_prices.view', 'price hikes');
+  }
+
+  const item = await PriceHike.findByIdAndDelete(id);
+  if (!item) {
+    throw new ApiError(404, 'Price hike not found');
+  }
+
+  return { id: String(id) };
+};
+
+/// Automatic surge settings and the hexagons surging right now, for the
+/// Price Hike page.
+///
+/// Surge is set per vehicle type: `settings` is the default every vehicle
+/// without its own follows, and `vehicles` lists every vehicle type with the
+/// settings that price it now - its own (`has_own_settings`) or default's.
+const automaticSurgeState = async () => {
+  const [profiles, vehicles, active] = await Promise.all([
+    getSurgeProfiles({ fresh: true }),
+    Vehicle.find({}).select('name status active transport_type').sort({ name: 1 }).lean(),
+    listActiveSurges({ radiusKm: Infinity }),
+  ]);
+
+  return {
+    settings: profiles.default,
+    vehicles: vehicles.map((vehicle) => {
+      const id = String(vehicle._id);
+      const own = profiles.vehicles.get(id);
+      return {
+        vehicle_type_id: id,
+        name: vehicle.name || 'Vehicle',
+        transport_type: vehicle.transport_type || '',
+        active: vehicle.active !== false && Number(vehicle.status ?? 1) !== 0,
+        has_own_settings: Boolean(own),
+        settings: own || { ...profiles.default, vehicle_type_id: null },
+      };
+    }),
+    default_profile: DEFAULT_PROFILE,
+    active,
+  };
+};
+
+export const getAutomaticSurge = async (currentAdmin = null) => {
+  if (currentAdmin) {
+    assertAdminPermission(currentAdmin, 'set_prices.view', 'price hikes');
+  }
+  return automaticSurgeState();
+};
+
+/// Saves the default settings, or one vehicle type's with `vehicle_type_id`.
+export const updateAutomaticSurge = async (payload, currentAdmin = null) => {
+  if (currentAdmin) {
+    assertAdminPermission(currentAdmin, 'set_prices.view', 'price hikes');
+  }
+  await updateSurgeSettings(payload || {});
+  return automaticSurgeState();
+};
+
+/// A vehicle type stops using its own settings and follows default again.
+export const resetVehicleAutomaticSurge = async (vehicleTypeId, currentAdmin = null) => {
+  if (currentAdmin) {
+    assertAdminPermission(currentAdmin, 'set_prices.view', 'price hikes');
+  }
+  await resetVehicleSurgeSettings(vehicleTypeId);
+  return automaticSurgeState();
+};
+
+/// The records behind one card on the Admin Earnings page, with the same
+/// filters. `metric` is the card: commission, gross-fare, driver-earnings,
+/// net-revenue, average-commission, cash-commission, online-commission,
+/// refunds or completed.
+export const getAdminEarningDetails = async (query = {}) => {
+  const metric = String(query.metric || 'commission');
+  const earnings = await getAdminEarnings({ ...query, page: 1, limit: 100000 });
+  const rides = earnings.results || [];
+  const summary = earnings.summary || {};
+  const money = (value) => Number(Number(value || 0).toFixed(2));
+
+  const rideColumns = [
+    { key: 'completedAt', label: 'Completed', type: 'date' },
+    { key: 'requestId', label: 'Request' },
+    { key: 'userName', label: 'Rider' },
+    { key: 'driverName', label: 'Driver' },
+    { key: 'vehicleName', label: 'Vehicle' },
+    { key: 'paymentDetail', label: 'Paid' },
+    { key: 'grossFare', label: 'Fare', type: 'money' },
+    { key: 'adminCommission', label: 'Commission', type: 'money' },
+    { key: 'driverEarnings', label: 'Driver earning', type: 'money' },
+  ];
+  const rideResult = (title, description, rows, totalLabel, totalValue) => ({
+    metric,
+    title,
+    description,
+    columns: rideColumns,
+    rows,
+    total: rows.length,
+    totals: [{ label: totalLabel, value: totalValue, type: 'money' }, { label: 'Trips', value: rows.length }],
+  });
+
+  switch (metric) {
+    case 'gross-fare':
+      return rideResult('Gross ride fare', 'Every completed trip and its fare.', rides, 'Gross fare', money(summary.grossFare));
+    case 'completed':
+      return rideResult('Completed transactions', 'Every completed trip in the period.', rides, 'Gross fare', money(summary.grossFare));
+    case 'average-commission':
+      return {
+        ...rideResult('Average commission', 'Total commission divided by completed trips.', rides, 'Total commission', money(summary.adminCommission)),
+        totals: [
+          { label: 'Average per trip', value: money(summary.averageCommission), type: 'money' },
+          { label: 'Total commission', value: money(summary.adminCommission), type: 'money' },
+          { label: 'Trips', value: rides.length },
+        ],
+      };
+    case 'cash-commission': {
+      const rows = rides.filter((row) => row.paymentMethod === 'cash');
+      return rideResult('Cash commission', 'Commission on trips the rider paid in cash.', rows, 'Commission', money(summary.byCash));
+    }
+    case 'online-commission': {
+      const rows = rides.filter((row) => row.paymentMethod === 'online');
+      return rideResult('Online commission', 'Commission on trips paid online (including cash bookings paid online at the end).', rows, 'Commission', money(summary.byOnline));
+    }
+    case 'driver-earnings': {
+      const byDriver = new Map();
+      for (const row of rides) {
+        const key = row.driverId || row.driverName;
+        const entry = byDriver.get(key) || { driverName: row.driverName, driverPhone: row.driverPhone, trips: 0, grossFare: 0, adminCommission: 0, driverEarnings: 0 };
+        entry.trips += 1;
+        entry.grossFare += row.grossFare;
+        entry.adminCommission += row.adminCommission;
+        entry.driverEarnings += row.driverEarnings;
+        byDriver.set(key, entry);
+      }
+      const rows = [...byDriver.values()]
+        .map((entry) => ({ ...entry, grossFare: money(entry.grossFare), adminCommission: money(entry.adminCommission), driverEarnings: money(entry.driverEarnings) }))
+        .sort((a, b) => b.driverEarnings - a.driverEarnings);
+      return {
+        metric,
+        title: 'Driver earnings',
+        description: 'What each driver earned from completed trips, after commission.',
+        columns: [
+          { key: 'driverName', label: 'Driver' },
+          { key: 'driverPhone', label: 'Phone' },
+          { key: 'trips', label: 'Trips' },
+          { key: 'grossFare', label: 'Fares', type: 'money' },
+          { key: 'adminCommission', label: 'Commission', type: 'money' },
+          { key: 'driverEarnings', label: 'Earned', type: 'money' },
+        ],
+        rows,
+        total: rows.length,
+        totals: [{ label: 'Driver earnings', value: money(summary.driverEarnings), type: 'money' }, { label: 'Drivers', value: rows.length }],
+      };
+    }
+    case 'net-revenue': {
+      const range = dateMatch(earnings.filters?.from ? new Date(earnings.filters.from) : null, earnings.filters?.to ? new Date(`${earnings.filters.to}T23:59:59.999`) : null);
+      const passes = await DriverSubscription.find({ paidAt: { $ne: null, ...range } })
+        .sort({ paidAt: -1 })
+        .populate('driverId', 'name phone')
+        .lean();
+      const rows = [
+        { item: 'Commission on completed trips', detail: `${rides.length} trips`, amount: money(summary.adminCommission) },
+        { item: 'Driver subscription passes', detail: `${summary.subscriptionCount || 0} passes sold`, amount: money(summary.subscriptionRevenue) },
+        { item: 'Refunds to riders', detail: `${summary.refundCount || 0} refunds`, amount: -money(summary.refunds) },
+        ...passes.map((pass) => ({
+          item: `Pass: ${pass.planName || 'Subscription'}`,
+          detail: `${pass.driverId?.name || 'Driver'} · ${pass.paymentMethod || 'wallet'} · ${new Date(pass.paidAt).toLocaleString('en-IN')}`,
+          amount: money(pass.amount),
+          indent: true,
+        })),
+      ];
+      return {
+        metric,
+        title: 'Net platform revenue',
+        description: 'Commission plus driver subscription passes, less refunds. Zone and vehicle filters apply to commission only.',
+        columns: [
+          { key: 'item', label: 'Item' },
+          { key: 'detail', label: 'Detail' },
+          { key: 'amount', label: 'Amount', type: 'money' },
+        ],
+        rows,
+        total: rows.length,
+        totals: [{ label: 'Net platform revenue', value: money(summary.netPlatformRevenue), type: 'money' }],
+      };
+    }
+    case 'refunds': {
+      const range = dateMatch(earnings.filters?.from ? new Date(earnings.filters.from) : null, earnings.filters?.to ? new Date(`${earnings.filters.to}T23:59:59.999`) : null);
+      const wallets = await UserWallet.aggregate([
+        { $unwind: '$transactions' },
+        { $match: { 'transactions.kind': 'credit', 'transactions.title': /refund/i, ...(Object.keys(range).length ? { 'transactions.createdAt': range } : {}) } },
+        { $sort: { 'transactions.createdAt': -1 } },
+        { $lookup: { from: 'taxiusers', localField: 'userId', foreignField: '_id', as: 'user' } },
+      ]);
+      const rows = wallets.map((w) => ({
+        createdAt: w.transactions.createdAt,
+        rider: w.user?.[0]?.name || 'Rider',
+        phone: w.user?.[0]?.phone || '',
+        title: w.transactions.title,
+        amount: money(w.transactions.amount),
+      }));
+      return {
+        metric,
+        title: 'Refunds',
+        description: 'Refunds credited to riders\' wallets.',
+        columns: [
+          { key: 'createdAt', label: 'Date', type: 'date' },
+          { key: 'rider', label: 'Rider' },
+          { key: 'phone', label: 'Phone' },
+          { key: 'title', label: 'Reason' },
+          { key: 'amount', label: 'Amount', type: 'money' },
+        ],
+        rows,
+        total: rows.length,
+        totals: [{ label: 'Refunded', value: money(summary.refunds), type: 'money' }, { label: 'Refunds', value: rows.length }],
+      };
+    }
+    case 'commission':
+    default:
+      return rideResult('Total commission', 'Commission ZI CAB earned on each completed trip.', rides, 'Commission', money(summary.adminCommission));
+  }
 };

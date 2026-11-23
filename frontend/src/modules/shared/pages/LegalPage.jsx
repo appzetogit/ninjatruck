@@ -1,14 +1,11 @@
 import React from 'react';
-import { ArrowLeft, FileText, IndianRupee, Mail, Phone, ReceiptText, Scale, ScrollText, ShieldCheck } from 'lucide-react';
+import { ArrowLeft, FileText, IndianRupee, Mail, Phone, ReceiptText, Scale, ScrollText, ShieldCheck, Trash2 } from 'lucide-react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { SUPPORT_INFO } from '../content/supportInfo';
+import { useSupportInfo } from '../content/supportInfo';
+import useLegalContent from '../content/useLegalContent';
+import { OwnerContactCard } from '../components/OwnerContactCard';
 import termsRawText from '../content/terms-content.txt?raw';
 import privacyRawText from '../content/privacy-content.txt?raw';
-
-const ownerContact = {
-  phone: SUPPORT_INFO.phone,
-  email: SUPPORT_INFO.email,
-};
 
 const vehiclePricing = [
   { type: 'Bike', capacity: 'Up to 2 riders', price: 'Starts at Rs 49', cancellationCut: 'Admin cut up to Rs 10', note: 'Best for quick solo rides and short-distance travel.' },
@@ -24,7 +21,7 @@ const legalContent = {
     title: 'Terms & Conditions',
     icon: ScrollText,
     intro:
-      'These terms are shown from the latest legal document provided for Appzeto 24 users and include the applicable bike, package, auto, and cab clauses.',
+      'These terms apply to everyone who uses ZI CAB - riders booking rides and parcel deliveries, and drivers and vehicle owners providing them.',
     rawText: termsRawText,
   },
   privacy: {
@@ -32,7 +29,7 @@ const legalContent = {
     title: 'Privacy Policy',
     icon: ShieldCheck,
     intro:
-      'This privacy policy is shown from the latest legal document provided for Appzeto 24 users and explains how information is collected, used, processed, stored, and protected.',
+      'How ZI CAB collects, uses, shares, stores and protects the information of riders, drivers and website visitors.',
     rawText: privacyRawText,
   },
   refund: {
@@ -40,7 +37,7 @@ const legalContent = {
     title: 'Refund & Cancellation Policy',
     icon: ReceiptText,
     intro:
-      'This page explains refund eligibility, cancellation timelines, and indicative prices for the main vehicle types available on the Appzeto 24  Trawler platform. Refunds are reviewed based on service status, time of cancellation, and payment mode.',
+      'This page explains refund eligibility, cancellation timelines, and indicative prices for the main vehicle types available on the Zicab Group Private Limited platform. Refunds are reviewed based on service status, time of cancellation, and payment mode.',
     sections: [
       {
         title: 'When refunds may be approved',
@@ -54,7 +51,7 @@ const legalContent = {
       {
         title: 'Refund policy overview',
         body:
-          'Appzeto 24  Trawler reviews refund requests on a case-by-case basis to confirm whether the booking was completed, cancelled before service, cancelled after dispatch, or affected by a technical or payment issue. Approved refunds are returned only after internal verification of ride logs, payment status, and service records.',
+          'Zicab Group Private Limited reviews refund requests on a case-by-case basis to confirm whether the booking was completed, cancelled before service, cancelled after dispatch, or affected by a technical or payment issue. Approved refunds are returned only after internal verification of ride logs, payment status, and service records.',
       },
       {
         title: 'Cancellation rules',
@@ -103,7 +100,7 @@ const legalContent = {
         bullets: [
           'Raise the issue through the support team with your booking ID, payment details, and reason for the request.',
           'Submit the request as early as possible after the cancelled or affected booking.',
-          'Appzeto 24   Trawler may ask for screenshots, transaction references, or additional verification before approval.',
+          'Zicab Group Private Limited may ask for screenshots, transaction references, or additional verification before approval.',
         ],
       },
       {
@@ -122,7 +119,7 @@ const legalContent = {
     title: 'Cancellation Policy',
     icon: Scale,
     intro:
-      'This page summarizes how cancellations are handled across Appzeto 24  Trawler booking categories.',
+      'This page summarizes how cancellations are handled across Zicab Group Private Limited booking categories.',
     sections: [
       {
         title: 'General policy',
@@ -130,6 +127,41 @@ const legalContent = {
           'Free cancellation may be available during a short grace period.',
           'Charges may apply after partner assignment, dispatch, or service start.',
           'Refundability depends on timing, service state, and payment verification.',
+        ],
+      },
+    ],
+  },
+  // Public, no login needed: the "User Data Deletion Instructions URL" app
+  // stores and Meta ask for. Same terms as section J of the privacy policy.
+  deletion: {
+    label: 'Data Deletion',
+    title: 'Delete Your Account and Data',
+    icon: Trash2,
+    intro:
+      'You can ask ZI CAB to delete your account and the personal information linked to it at any time. This applies to riders, drivers, vehicle owners and bus partners.',
+    sections: [
+      {
+        title: 'Delete from the app',
+        bullets: [
+          'Riders: open the ZI CAB app, go to Profile, tap Delete Account and confirm.',
+          'Drivers and vehicle owners: open the ZI CAB Driver app or your partner panel on zicab.in, go to your profile and choose Delete Account.',
+        ],
+      },
+      {
+        title: 'Or ask us to delete it',
+        bullets: [
+          'Email zicabofficial@gmail.com from any address, with the subject "Delete my account" and your registered mobile number.',
+          'Or call +91 8904343123 from your registered mobile number.',
+          'We confirm the request with you and respond within 30 days.',
+        ],
+      },
+      {
+        title: 'What is deleted and what is kept',
+        bullets: [
+          'Your profile, contact details, saved places and app login are removed.',
+          'Trip, payment and tax records are kept only for the period the law requires, and for resolving disputes and preventing fraud.',
+          'Driver verification documents are kept for the period required by law after the account is closed.',
+          'If you signed in with Facebook, deleting your ZI CAB account also removes the information we received from Facebook.',
         ],
       },
     ],
@@ -142,6 +174,7 @@ const getDocumentType = (pathname = '') => {
   if (value.includes('terms-and-conditions') || value.includes('terms')) return 'terms';
   if (value.includes('refund')) return 'refund';
   if (value.includes('cancellation')) return 'cancellation';
+  if (value.includes('deletion') || value.includes('delete-data')) return 'deletion';
   return 'terms';
 };
 
@@ -156,9 +189,20 @@ const isLegalHeadingLine = (line = '') => {
 };
 
 const LegalPage = () => {
+  const { phone, email, phoneHref } = useSupportInfo();
+  const ownerContact = { phone, email, phoneHref };
   const navigate = useNavigate();
   const location = useLocation();
-  const content = legalContent[getDocumentType(location.pathname)];
+  const documentType = getDocumentType(location.pathname);
+  const managed = useLegalContent()[documentType] || {};
+  const bundled = legalContent[documentType];
+  // Whatever the admin has saved wins; anything left blank keeps the bundled
+  // copy, so a half-filled document still renders a complete page.
+  const content = {
+    ...bundled,
+    intro: managed.intro || bundled.intro,
+    rawText: managed.body || bundled.rawText,
+  };
   const Icon = content.icon || FileText;
   const rawParagraphs = content.rawText
     ? content.rawText
@@ -196,7 +240,7 @@ const LegalPage = () => {
           </p>
           <div className="mt-8 flex flex-col gap-4 sm:flex-row sm:flex-wrap">
             <a
-              href={`tel:${ownerContact.phone}`}
+              href={`tel:${ownerContact.phoneHref}`}
               className="inline-flex items-center gap-3 rounded-2xl border border-white/10 bg-white/5 px-5 py-3 text-sm font-bold text-white transition hover:bg-white/10"
             >
               <Phone size={18} className="text-[#f4b400]" />
@@ -215,6 +259,7 @@ const LegalPage = () => {
 
       <section className="px-6 py-16">
         <div className="mx-auto max-w-6xl space-y-8">
+          <OwnerContactCard />
           {content.rawText ? (
             <div className="rounded-[28px] border border-stone-200 bg-white p-8 shadow-sm">
               <div className="space-y-5 text-sm leading-8 text-slate-700 md:text-base">

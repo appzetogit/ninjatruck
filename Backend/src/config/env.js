@@ -45,6 +45,9 @@ export const env = {
   nodeEnv: process.env.NODE_ENV || 'development',
   port: Number.isInteger(Number(process.env.PORT)) ? Number(process.env.PORT) : 4000,
   mongoUri: process.env.MONGODB_URI,
+  // Used server-side for Directions. Present in .env all along, but never
+  // read, which is why routing fell to the public OSRM demo host.
+  googleMapsApiKey: process.env.GOOGLE_MAPS_API_KEY || '',
   mongoDbName: process.env.MONGODB_DB_NAME || 'appzeto_taxi',
   jwtSecret: resolvedJwtSecret,
   jwtExpiresIn: resolvedJwtExpiresIn,
@@ -66,11 +69,12 @@ export const env = {
     process.env.PHONEPE_CALLBACK_BASE_URL ||
     process.env.PUBLIC_PHONEPE_REDIRECT_URL ||
     '',
-  cloudinary: {
-    cloudName: process.env.CLOUDINARY_CLOUD_NAME || '',
-    apiKey: process.env.CLOUDINARY_API_KEY || '',
-    apiSecret: process.env.CLOUDINARY_API_SECRET || '',
-    folder: process.env.CLOUDINARY_FOLDER || 'appzeto-taxi',
+  uploads: {
+    // Files are stored on this server under Backend/uploads and served by
+    // express.static at /uploads. UPLOAD_FOLDER is the default top-level
+    // directory; callers usually pass their own.
+    folder: process.env.UPLOAD_FOLDER || 'zicab',
+    maxBytes: process.env.UPLOAD_MAX_BYTES || '',
   },
   firebase: {
     databaseURL: process.env.FIREBASE_DATABASE_URL || '',
@@ -84,6 +88,13 @@ export const env = {
     useDefaultOtp: process.env.USE_DEFAULT_OTP || 'false',
     staticOtpPhone: readEnv('STATIC_OTP_PHONE'),
     staticOtpCode: readEnv('STATIC_OTP_CODE'),
+    // Numbers that always accept a fixed OTP, as "phone:otp,phone:otp".
+    //
+    // The pair above holds one number and is shared by the rider and driver
+    // apps, which is not enough for app-store review: Google needs a demo
+    // login that works without receiving an SMS, and a second one is wanted
+    // for the driver app at the same time.
+    demoLoginPhones: readEnv('DEMO_LOGIN_PHONES'),
     otpExpiryMinutes:
       Number.isFinite(Number(process.env.OTP_EXPIRY_MINUTES)) && Number(process.env.OTP_EXPIRY_MINUTES) > 0
         ? Number(process.env.OTP_EXPIRY_MINUTES)
@@ -98,6 +109,9 @@ export const env = {
     },
   },
   driverWallet: {
+    joiningBonus: Number.isFinite(Number(process.env.DRIVER_JOINING_BONUS))
+      ? Number(process.env.DRIVER_JOINING_BONUS)
+      : 100,
     defaultCashLimit: Number.isFinite(Number(process.env.DRIVER_WALLET_DEFAULT_CASH_LIMIT))
       ? Number(process.env.DRIVER_WALLET_DEFAULT_CASH_LIMIT)
       : 500,

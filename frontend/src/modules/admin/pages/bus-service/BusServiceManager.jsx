@@ -10,6 +10,8 @@ import {
   Bus,
   CalendarDays,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   Clock3,
   CopyPlus,
   Eye,
@@ -19,12 +21,17 @@ import {
   Plus,
   Route,
   Save,
+  Sparkles,
   Trash2,
   Upload,
+  X,
   XCircle,
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { adminService } from '../../services/adminService';
+import HorizontalSeatMap from './HorizontalSeatMap';
+import SeatNumberingPanel from './SeatNumberingPanel';
+import { carryOverSeatDetails, findSeatNumberProblems } from './seatNumbering';
 import { computeDrivingRoute } from '../../../../shared/utils/googleRoutes';
 import {
   BUS_BLUEPRINT_TEMPLATES,
@@ -38,6 +45,18 @@ import {
 } from '../../services/busService';
 import { useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { HAS_VALID_GOOGLE_MAPS_KEY, useAppGoogleMapsLoader } from '../../utils/googleMaps';
+import {
+  BUS_HALT_MINUTES,
+  applyAutoRouting,
+  createExtraRoute,
+  describeRoute,
+  fillStopCoords,
+  getRouteLabel,
+  getRouteWaypoints,
+  getStopQuery,
+  legDurationSeconds,
+  listDraftRoutes,
+} from './busRouteAuto';
 
 const DAY_OPTIONS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 const AMENITY_OPTIONS = [
@@ -103,6 +122,7 @@ const blankStop = () => ({
   stopType: 'pickup',
   arrivalTime: '',
   departureTime: '',
+  coords: null,
 });
 
 const blankSchedule = () => ({
@@ -112,6 +132,7 @@ const blankSchedule = () => ({
   arrivalTime: '',
   activeDays: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'],
   status: 'active',
+  routeKey: 'main',
 });
 
 const blankCancellationRule = () => ({
@@ -190,6 +211,7 @@ const buildMirroredReturnRoute = (route = {}) => ({
   destinationCoords: toCoords(route.originCoords),
   distanceKm: route.distanceKm || '',
   durationHours: route.durationHours || '',
+  autoTimings: route.autoTimings !== false,
   stops: Array.isArray(route.stops)
     ? route.stops
         .slice()
@@ -201,9 +223,42 @@ const buildMirroredReturnRoute = (route = {}) => ({
           stopType: swapStopType(stop.stopType),
           arrivalTime: stop.departureTime || '',
           departureTime: stop.arrivalTime || '',
+          coords: toCoords(stop.coords),
         }))
     : [],
 });
+
+// Applies `updater` to one route of the draft. Main-route edits re-mirror
+// the return route when it is switched on.
+const patchDraftRoute = (current, key, updater) => {
+  if (key === 'main') {
+    const nextRoute = updater(current.route);
+    return {
+      ...current,
+      route: nextRoute,
+      returnRoute: current.returnRouteEnabled ? buildMirroredReturnRoute(nextRoute) : current.returnRoute,
+    };
+  }
+  if (key === 'return') {
+    return { ...current, returnRoute: updater(current.returnRoute) };
+  }
+  return {
+    ...current,
+    extraRoutes: (current.extraRoutes || []).map((item) => (item.id === key ? updater(item) : item)),
+  };
+};
+
+const geocodePlace = (query) =>
+  new Promise((resolve) => {
+    if (!query || !window.google?.maps?.Geocoder) {
+      resolve(null);
+      return;
+    }
+    new window.google.maps.Geocoder().geocode(
+      { address: query, componentRestrictions: { country: 'IN' } },
+      (results, status) => resolve(status === 'OK' && results?.[0] ? getCoordsFromPlace(results[0]) : null),
+    );
+  });
 
 const fileToDataUrl = (file) =>
   new Promise((resolve, reject) => {
@@ -212,96 +267,6 @@ const fileToDataUrl = (file) =>
     reader.onerror = reject;
     reader.readAsDataURL(file);
   });
-
-const SeatCell = ({ cell, onToggle }) => {
-  if (!cell || cell.kind !== 'seat') {
-    return <div className="h-11 rounded-2xl bg-transparent" />;
-  }
-
-  const isBlocked = cell.status === 'blocked';
-  const isSleeper = cell.variant === 'sleeper';
-  return (
-    <button
-      type="button"
-      onClick={onToggle}
-      className={`relative flex items-center justify-center overflow-hidden border text-[10px] font-black tracking-wider transition ${
-        isBlocked
-          ? 'border-rose-200 bg-rose-50 text-rose-500'
-          : isSleeper
-            ? 'border-sky-200 bg-gradient-to-br from-sky-50 to-cyan-50 text-sky-700 hover:border-sky-300 hover:text-sky-800'
-            : 'border-slate-200 bg-white text-slate-700 hover:border-indigo-300 hover:text-indigo-600'
-      }`}
-      title={isBlocked ? 'Seat blocked for sale' : 'Seat available for sale'}
-      style={{
-        minHeight: isSleeper ? '58px' : '44px',
-        borderRadius: isSleeper ? '18px' : '14px',
-      }}
-    >
-      {isSleeper ? (
-        <>
-          <span className="absolute inset-y-1 left-1.5 w-2 rounded-full bg-sky-200" />
-          <span className="absolute right-1.5 top-1.5 h-2 w-8 rounded-full bg-white/60" />
-          <span className="pl-4">{cell.label}</span>
-        </>
-      ) : (
-        <>
-          <span className="absolute inset-x-2 top-1.5 h-1.5 rounded-full bg-slate-200" />
-          <span className="absolute bottom-1 right-1.5 h-2.5 w-2.5 rounded-full bg-slate-100" />
-          <span>{cell.label}</span>
-        </>
-      )}
-    </button>
-  );
-};
-
-const SeatDeckPreview = ({ title, deckRows, onToggleSeat }) => {
-  if (!deckRows?.length) return null;
-
-  const maxColumns = Math.max(...deckRows.map((row) => row.length), 1);
-
-  return (
-    <div className="rounded-[32px] border border-slate-200 bg-gradient-to-b from-slate-50 to-white p-4 shadow-inner">
-      <div className="mb-4 flex items-center justify-between">
-        <div>
-          <h4 className="text-sm font-black text-slate-900">{title}</h4>
-          <p className="text-[10px] font-medium text-slate-500">Tap any seat or berth to block or reopen it.</p>
-        </div>
-        <div className="rounded-full border border-slate-200 bg-white px-3 py-1 text-[10px] font-bold text-slate-500">
-          Redbus style
-        </div>
-      </div>
-
-      <div className="rounded-[26px] border border-slate-200 bg-white p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.65)]">
-        <div className="mb-4 flex items-center justify-between">
-          <div className="rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-[10px] font-black text-slate-500">
-            Entry
-          </div>
-          <div className="flex h-12 w-12 rotate-45 items-center justify-center rounded-2xl border-4 border-slate-200 border-b-transparent border-r-transparent">
-            <div className="-rotate-45 text-[10px] font-black text-slate-400">Front</div>
-          </div>
-        </div>
-
-        <div className="space-y-3">
-        {deckRows.map((row, rowIndex) => (
-          <div
-            key={`${title}-${rowIndex}`}
-            className="grid gap-2"
-            style={{ gridTemplateColumns: `repeat(${Math.max(maxColumns, row.length)}, minmax(0, 1fr))` }}
-          >
-            {row.map((cell, cellIndex) => (
-              <SeatCell
-                key={`${title}-${rowIndex}-${cellIndex}-${cell?.id || 'aisle'}`}
-                cell={cell}
-                onToggle={() => cell?.kind === 'seat' && onToggleSeat(cell.id)}
-              />
-            ))}
-          </div>
-        ))}
-        </div>
-      </div>
-    </div>
-  );
-};
 
 const BlueprintDeckConfigurator = ({ title, config, onChange }) => (
   <div className="rounded-[24px] border border-slate-200 bg-slate-50/80 p-4">
@@ -383,6 +348,7 @@ const BusServiceManager = ({
   description = 'Define coaches, preview seat blueprints, manage inventory, and publish recurring departures with multi-stop routes.',
   emptyLabel = 'No buses found.',
   defaultStatus = 'draft',
+  allowSeatNumbering = true,
 }) => {
   const buildFreshDraft = () => ({
     ...createBusDraft(),
@@ -427,6 +393,10 @@ const BusServiceManager = ({
   const [draft, setDraft] = useState(() => buildFreshDraft());
   const [isLoadingCatalog, setIsLoadingCatalog] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
+  const [seatNumberMethod, setSeatNumberMethod] = useState('');
+  const [markingLadiesSeats, setMarkingLadiesSeats] = useState(false);
+  const [numberingSeatId, setNumberingSeatId] = useState('');
+  const [upcomingBusBookings, setUpcomingBusBookings] = useState(0);
   const [ownerDrivers, setOwnerDrivers] = useState([]);
   const [driverSearch, setDriverSearch] = useState('');
   const [routePath, setRoutePath] = useState([]);
@@ -434,6 +404,11 @@ const BusServiceManager = ({
   const routeMapRef = useRef(null);
   const routePreviewCacheRef = useRef(new Map());
   const cityGeocodeCacheRef = useRef(new Map());
+  const [activeRouteKey, setActiveRouteKey] = useState('main');
+  // Auto-routing results keyed by waypoint signature: { status, path }.
+  const [routeAutoStatus, setRouteAutoStatus] = useState({});
+  const routeLegsCacheRef = useRef(new Map());
+  const stopGeocodeCacheRef = useRef(new Map());
   const { isLoaded: isGoogleMapsLoaded } = useAppGoogleMapsLoader();
   const canUsePlacesAutocomplete =
     isGoogleMapsLoaded &&
@@ -619,18 +594,57 @@ const BusServiceManager = ({
     () => ownerDrivers.find((driver) => String(driver.id) === String(draft.ownerDriverId || '')) || null,
     [draft.ownerDriverId, ownerDrivers],
   );
-  const routePreviewPoints = useMemo(() => {
-    const points = [
-      toCoords(draft.route?.originCoords),
-      toCoords(draft.route?.destinationCoords),
-    ].filter(Boolean);
-
-    if (points.length >= 2) {
-      return points;
+  // The route editor works on one route at a time: the main route or an
+  // extra route (the return route is generated from the main one).
+  const editableRoutes = listDraftRoutes(draft).filter((entry) => entry.key !== 'return');
+  const activeRouteEntry = editableRoutes.find((entry) => entry.key === activeRouteKey) || editableRoutes[0];
+  const editingRouteKey = activeRouteEntry.key;
+  const activeRoute = activeRouteEntry.route;
+  const activeWaypoints = getRouteWaypoints(activeRoute);
+  const activeAuto = activeWaypoints ? routeAutoStatus[activeWaypoints.signature] : null;
+  const autoStatus = (() => {
+    const tone = {
+      muted: 'border-slate-200 bg-slate-50 text-slate-500',
+      busy: 'border-sky-200 bg-sky-50 text-sky-700',
+      warn: 'border-amber-200 bg-amber-50 text-amber-700',
+      error: 'border-rose-200 bg-rose-50 text-rose-700',
+      ok: 'border-emerald-200 bg-emerald-50 text-emerald-700',
+    };
+    if (activeRoute.autoTimings === false) {
+      return { className: tone.muted, text: 'Manual timings: the distance, duration and stop times you type are kept. Tap "Manual · use auto" to calculate them again.' };
     }
-
-    return points;
-  }, [draft.route?.destinationCoords, draft.route?.originCoords]);
+    if (!HAS_VALID_GOOGLE_MAPS_KEY) {
+      return { className: tone.warn, text: 'Google Maps is not configured, so enter distance and timings by hand.' };
+    }
+    if (!activeWaypoints) {
+      return { className: tone.muted, text: 'Pick the origin and destination cities from the suggestions and distance and timings will be calculated automatically.' };
+    }
+    if (!activeAuto) {
+      return { className: tone.busy, text: 'Calculating distance and timings from Google Maps…' };
+    }
+    if (activeAuto.status === 'failed') {
+      return { className: tone.error, text: 'Google Maps could not find a driving route through these points. Check the stops or switch to manual.' };
+    }
+    const locatedStops = activeWaypoints.points.length - 2;
+    const unlocatedStops = activeRoute.stops.filter((stop) => getStopQuery(stop) && !toCoords(stop.coords)).length;
+    const hasDeparture = draft.schedules.some(
+      (schedule) => String(schedule.routeKey || 'main') === editingRouteKey && String(schedule.departureTime || '').trim(),
+    );
+    return {
+      className: unlocatedStops || !hasDeparture ? tone.warn : tone.ok,
+      text: [
+        `Calculated from Google Maps through ${locatedStops} stop${locatedStops === 1 ? '' : 's'}, with a ${BUS_HALT_MINUTES} min halt at each pickup.`,
+        hasDeparture
+          ? 'Stop times follow the first schedule on this route; every schedule gets its own arrival time.'
+          : 'Add a departure time to a schedule on this route to time the stops.',
+        unlocatedStops ? `${unlocatedStops} stop${unlocatedStops === 1 ? ' is' : 's are'} not on the map yet. Pick a suggestion for them.` : '',
+      ].filter(Boolean).join(' '),
+    };
+  })();
+  const routePreviewPoints = useMemo(
+    () => [toCoords(activeRoute?.originCoords), toCoords(activeRoute?.destinationCoords)].filter(Boolean),
+    [activeRoute?.destinationCoords, activeRoute?.originCoords],
+  );
   const routeMapCenter = useMemo(() => {
     if (routePreviewPoints.length === 0) {
       return { lat: 22.7196, lng: 75.8577 };
@@ -653,13 +667,18 @@ const BusServiceManager = ({
       lng: totals.lng / routePreviewPoints.length,
     };
   }, [routePreviewPoints]);
+  const activeAutoPath = activeAuto?.path;
   const routePolylinePath = useMemo(() => {
+    if (activeAutoPath?.length >= 2) {
+      return activeAutoPath;
+    }
+
     if (routePath.length >= 2) {
       return routePath;
     }
 
     return routePreviewPoints;
-  }, [routePath, routePreviewPoints]);
+  }, [activeAutoPath, routePath, routePreviewPoints]);
   const filteredOwnerDrivers = useMemo(() => {
     const query = String(driverSearch || '').trim().toLowerCase();
     if (!query) return ownerDrivers.slice(0, 8);
@@ -741,6 +760,64 @@ const BusServiceManager = ({
     routeMapRef.current.fitBounds(bounds, 60);
   }, [routePolylinePath, routePreviewPoints.length]);
 
+  // Auto distance & timings: once a route's origin, destination and stops
+  // are known, locate the stops, ask Google for the driving legs and fill in
+  // distance, duration, stop times and schedule arrivals. Runs shortly after
+  // each edit; applyAutoRouting returns the same draft when nothing changes,
+  // so the update it makes does not loop.
+  useEffect(() => {
+    if (!isGoogleMapsLoaded || !window.google?.maps) return undefined;
+    let cancelled = false;
+
+    const timer = setTimeout(async () => {
+      const unlocated = new Set();
+      listDraftRoutes(draft).forEach(({ route }) =>
+        (route.stops || []).forEach((stop) => {
+          const query = getStopQuery(stop);
+          if (query && !toCoords(stop.coords) && !stopGeocodeCacheRef.current.has(query)) unlocated.add(query);
+        }),
+      );
+      for (const query of unlocated) {
+        stopGeocodeCacheRef.current.set(query, await geocodePlace(query));
+        if (cancelled) return;
+      }
+
+      for (const { route } of listDraftRoutes(fillStopCoords(draft, stopGeocodeCacheRef.current))) {
+        const waypoints = route.autoTimings === false ? null : getRouteWaypoints(route);
+        if (!waypoints || routeLegsCacheRef.current.has(waypoints.signature)) continue;
+
+        const result = await computeDrivingRoute({
+          origin: waypoints.points[0],
+          destination: waypoints.points[waypoints.points.length - 1],
+          intermediates: waypoints.points.slice(1, -1),
+          region: 'IN',
+        });
+        const legs =
+          result.status === 'OK' && result.legs.length === waypoints.points.length - 1
+            ? result.legs.map((leg) => ({
+                distanceMeters: Number(leg?.distanceMeters || 0),
+                durationSeconds: legDurationSeconds(leg),
+              }))
+            : null;
+        routeLegsCacheRef.current.set(waypoints.signature, legs);
+        setRouteAutoStatus((current) => ({
+          ...current,
+          [waypoints.signature]: { status: legs ? 'ok' : 'failed', path: legs ? result.path : [] },
+        }));
+        if (cancelled) return;
+      }
+
+      setDraft((current) =>
+        applyAutoRouting(fillStopCoords(current, stopGeocodeCacheRef.current), routeLegsCacheRef.current),
+      );
+    }, 600);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [draft, isGoogleMapsLoaded]);
+
   const openListView = () => {
     setDetailBusId(null);
     navigate(basePath);
@@ -801,23 +878,46 @@ const BusServiceManager = ({
   };
 
   const updateRouteField = (field, value) => {
-    setDraft((current) => ({
-      ...current,
-      route: {
-        ...current.route,
+    setDraft((current) =>
+      patchDraftRoute(current, editingRouteKey, (route) => ({
+        ...route,
         [field]: value,
         ...(field === 'originCity' ? { originCoords: null } : {}),
         ...(field === 'destinationCity' ? { destinationCoords: null } : {}),
-      },
-      returnRoute: current.returnRouteEnabled
-        ? buildMirroredReturnRoute({
-            ...current.route,
-            [field]: value,
-            ...(field === 'originCity' ? { originCoords: null } : {}),
-            ...(field === 'destinationCity' ? { destinationCoords: null } : {}),
-          })
-        : current.returnRoute,
+        // Typing a distance or duration means the admin wants their own value.
+        ...(field === 'distanceKm' || field === 'durationHours' ? { autoTimings: false } : {}),
+      })),
+    );
+  };
+
+  const setRouteAutoTimings = (key, enabled) => {
+    setDraft((current) => patchDraftRoute(current, key, (route) => ({ ...route, autoTimings: enabled })));
+  };
+
+  const addExtraRoute = () => {
+    const nextRoute = createExtraRoute((draft.extraRoutes || []).length);
+    setDraft((current) => ({
+      ...current,
+      extraRoutes: [...(current.extraRoutes || []), nextRoute],
+      schedules: [...current.schedules, { ...blankSchedule(), label: 'New route service', routeKey: nextRoute.id }],
     }));
+    setActiveRouteKey(nextRoute.id);
+    toast.success('Extra route added with its own schedule below.');
+  };
+
+  const removeExtraRoute = (routeId) => {
+    const routeSchedules = draft.schedules.filter((schedule) => schedule.routeKey === routeId);
+    const label = `${getRouteLabel(draft, routeId)} (${describeRoute((draft.extraRoutes || []).find((item) => item.id === routeId))})`;
+    const message = routeSchedules.length
+      ? `Remove ${label} and its ${routeSchedules.length} schedule(s)?`
+      : `Remove ${label}?`;
+    if (!window.confirm(message)) return;
+    setDraft((current) => ({
+      ...current,
+      extraRoutes: (current.extraRoutes || []).filter((item) => item.id !== routeId),
+      schedules: current.schedules.filter((schedule) => schedule.routeKey !== routeId),
+    }));
+    setActiveRouteKey('main');
   };
 
   const applyRoutePlace = (field, place) => {
@@ -829,19 +929,44 @@ const BusServiceManager = ({
       return;
     }
 
-    setDraft((current) => {
-      const nextRoute = {
-        ...current.route,
+    setDraft((current) =>
+      patchDraftRoute(current, editingRouteKey, (route) => ({
+        ...route,
         [field]: cityLabel,
         ...(field === 'originCity' ? { originCoords: coords } : { destinationCoords: coords }),
-      };
+      })),
+    );
+  };
 
-      return {
-        ...current,
-        route: nextRoute,
-        returnRoute: current.returnRouteEnabled ? buildMirroredReturnRoute(nextRoute) : current.returnRoute,
-      };
-    });
+  const applyStopPlace = (stopId, place) => {
+    const coords = getCoordsFromPlace(place);
+    if (!coords) {
+      return;
+    }
+
+    const cityLabel = getCityLabelFromPlace(place);
+    setDraft((current) =>
+      patchDraftRoute(current, editingRouteKey, (route) => ({
+        ...route,
+        stops: route.stops.map((stop) =>
+          stop.id === stopId
+            ? {
+                ...stop,
+                pointName: String(place?.name || stop.pointName || '').trim(),
+                city: cityLabel || stop.city,
+                coords,
+              }
+            : stop,
+        ),
+      })),
+    );
+  };
+
+  const handleStopPlaceChanged = (stopId) => {
+    const autocomplete = autocompleteRefs.current[`stop:${stopId}`];
+    if (autocomplete && typeof autocomplete.getPlace === 'function') {
+      applyStopPlace(stopId, autocomplete.getPlace());
+    }
   };
 
   const registerAutocomplete = (field, autocomplete) => {
@@ -920,42 +1045,32 @@ const BusServiceManager = ({
 
     let nextDraft = draft;
 
-    for (const item of fieldsToResolve) {
-      const cityValue = String(nextDraft.route?.[item.field] || '').trim();
-      const coordsValue = toCoords(nextDraft.route?.[item.coordsField]);
+    for (const { key, route } of listDraftRoutes(draft).filter((entry) => entry.key !== 'return')) {
+      const routeLabel = key === 'main' ? '' : `${getRouteLabel(draft, key)} `;
+      for (const item of fieldsToResolve) {
+        const cityValue = String(route?.[item.field] || '').trim();
 
-      if (!cityValue) {
-        continue;
+        if (!cityValue || toCoords(route?.[item.coordsField])) {
+          continue;
+        }
+
+        if (!canUsePlacesAutocomplete) {
+          toast.error(`Google city suggestions are not ready. Select a valid Indian ${routeLabel}${item.label} city.`);
+          return null;
+        }
+
+        const resolved = await geocodeCity(cityValue);
+        if (!resolved?.coords) {
+          toast.error(`Select a valid Indian ${routeLabel}${item.label} city from suggestions.`);
+          return null;
+        }
+
+        nextDraft = patchDraftRoute(nextDraft, key, (currentRoute) => ({
+          ...currentRoute,
+          [item.field]: resolved.city || cityValue,
+          [item.coordsField]: resolved.coords,
+        }));
       }
-
-      if (coordsValue) {
-        continue;
-      }
-
-      if (!canUsePlacesAutocomplete) {
-        toast.error(`Google city suggestions are not ready. Select a valid Indian ${item.label} city.`);
-        return null;
-      }
-
-      const resolved = await geocodeCity(cityValue);
-      if (!resolved?.coords) {
-        toast.error(`Select a valid Indian ${item.label} city from suggestions.`);
-        return null;
-      }
-
-      const routeWithCoords = {
-        ...nextDraft.route,
-        [item.field]: resolved.city || cityValue,
-        [item.coordsField]: resolved.coords,
-      };
-
-      nextDraft = {
-        ...nextDraft,
-        route: routeWithCoords,
-        returnRoute: nextDraft.returnRouteEnabled
-          ? buildMirroredReturnRoute(routeWithCoords)
-          : nextDraft.returnRoute,
-      };
     }
 
     if (nextDraft !== draft) {
@@ -972,6 +1087,9 @@ const BusServiceManager = ({
         ...current,
         returnRouteEnabled: nextEnabled,
         returnRoute: nextEnabled ? buildMirroredReturnRoute(current.route) : current.returnRoute,
+        schedules: nextEnabled
+          ? current.schedules
+          : current.schedules.map((schedule) => (schedule.routeKey === 'return' ? { ...schedule, routeKey: 'main' } : schedule)),
       };
     });
   };
@@ -1034,10 +1152,27 @@ const BusServiceManager = ({
   };
 
   const switchBlueprintTemplate = (templateKey) => {
+    // A new template means new seats, so numbers set for the old ones can't carry.
+    if (
+      draft.blueprint?.seatNumbering?.mode
+      && !window.confirm('Changing the layout resets your seat numbers. Continue?')
+    ) {
+      return;
+    }
+    setSeatNumberMethod('');
+    setNumberingSeatId('');
     setDraft((current) => ({
       ...current,
-      blueprint: createBlueprintFromTemplate(templateKey),
+      blueprint: {
+        ...createBlueprintFromTemplate(templateKey),
+        // A template changes the seats, not how the map is drawn.
+        seatLayoutOrientation: current.blueprint?.seatLayoutOrientation || 'horizontal',
+      },
     }));
+  };
+
+  const setSeatLayoutOrientation = (seatLayoutOrientation) => {
+    setDraft((current) => ({ ...current, blueprint: { ...current.blueprint, seatLayoutOrientation } }));
   };
 
   const updateBlueprintLayoutConfig = (deckKey, field, value) => {
@@ -1073,8 +1208,64 @@ const BusServiceManager = ({
 
       return {
         ...current,
-        blueprint: createBusBlueprint(current.blueprint?.templateKey || 'seater_2_2', nextLayoutConfig),
+        blueprint: {
+          // Seats that still exist keep their numbers and stay blocked.
+          ...carryOverSeatDetails(
+            current.blueprint,
+            createBusBlueprint(current.blueprint?.templateKey || 'seater_2_2', nextLayoutConfig),
+          ),
+          seatLayoutOrientation: current.blueprint?.seatLayoutOrientation || 'horizontal',
+        },
       };
+    });
+  };
+
+  // Generated numbers on older buses can repeat across decks; only numbers someone
+  // chose are held to being unique.
+  const seatNumberProblems = useMemo(
+    () => (draft.blueprint?.seatNumbering?.mode ? findSeatNumberProblems(draft.blueprint) : {}),
+    [draft.blueprint],
+  );
+
+  // Opening another bus shows how that bus was numbered.
+  useEffect(() => {
+    setSeatNumberMethod(draft.blueprint?.seatNumbering?.mode || '');
+    setNumberingSeatId('');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draft.id]);
+
+  // Only for an admin editing a saved bus: registration has no bookings, and
+  // other portals can't read this.
+  const savedBusId = allowSeatNumbering && basePath === '/admin/bus-service' && catalog.some((item) => item.id === draft.id)
+    ? draft.id
+    : '';
+  useEffect(() => {
+    setUpcomingBusBookings(0);
+    if (!savedBusId) return undefined;
+    let active = true;
+    adminService
+      .getBusUpcomingBookings(savedBusId)
+      .then((response) => {
+        const data = response?.data?.data || response?.data || response;
+        if (active) setUpcomingBusBookings(Number(data?.count) || 0);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [savedBusId]);
+
+  const toggleLadiesSeat = (seatId) => {
+    setDraft((current) => {
+      const blueprint = { ...current.blueprint };
+      ['lowerDeck', 'upperDeck'].forEach((deckKey) => {
+        blueprint[deckKey] = (blueprint[deckKey] || []).map((row) =>
+          row.map((cell) => (
+            cell?.kind === 'seat' && cell.id === seatId ? { ...cell, ladiesOnly: cell.ladiesOnly !== true } : cell
+          )),
+        );
+      });
+      return { ...current, blueprint };
     });
   };
 
@@ -1099,55 +1290,57 @@ const BusServiceManager = ({
   };
 
   const updateStop = (stopId, field, value) => {
-    setDraft((current) => ({
-      ...current,
-      route: {
-        ...current.route,
-        stops: current.route.stops.map((stop) => (stop.id === stopId ? { ...stop, [field]: value } : stop)),
-      },
-      returnRoute: current.returnRouteEnabled
-        ? buildMirroredReturnRoute({
-            ...current.route,
-            stops: current.route.stops.map((stop) => (stop.id === stopId ? { ...stop, [field]: value } : stop)),
-          })
-        : current.returnRoute,
-    }));
+    setDraft((current) =>
+      patchDraftRoute(current, editingRouteKey, (route) => ({
+        ...route,
+        // Hand-typed stop times switch this route to manual timings.
+        ...(field === 'arrivalTime' || field === 'departureTime' ? { autoTimings: false } : {}),
+        stops: route.stops.map((stop) =>
+          stop.id === stopId
+            ? {
+                ...stop,
+                [field]: value,
+                // A renamed point has to be located again.
+                ...(field === 'city' || field === 'pointName' ? { coords: null } : {}),
+              }
+            : stop,
+        ),
+      })),
+    );
   };
 
+  // New stops go before the final drop point, so the order stays origin -> destination.
   const addStop = () => {
-    setDraft((current) => {
-      const nextStop = blankStop();
-      const nextStops = [...current.route.stops, nextStop];
-      return {
-        ...current,
-        route: {
-          ...current.route,
-          stops: nextStops,
-        },
-        returnRoute: current.returnRouteEnabled
-          ? buildMirroredReturnRoute({
-              ...current.route,
-              stops: nextStops,
-            })
-          : current.returnRoute,
-      };
-    });
+    setDraft((current) =>
+      patchDraftRoute(current, editingRouteKey, (route) => {
+        const stops = [...route.stops];
+        const insertAt = stops.length >= 2 && stops[stops.length - 1].stopType === 'drop' ? stops.length - 1 : stops.length;
+        stops.splice(insertAt, 0, { ...blankStop(), stopType: 'both' });
+        return { ...route, stops };
+      }),
+    );
+  };
+
+  const moveStop = (stopId, offset) => {
+    setDraft((current) =>
+      patchDraftRoute(current, editingRouteKey, (route) => {
+        const stops = [...route.stops];
+        const from = stops.findIndex((stop) => stop.id === stopId);
+        const to = from + offset;
+        if (from < 0 || to < 0 || to >= stops.length) return route;
+        [stops[from], stops[to]] = [stops[to], stops[from]];
+        return { ...route, stops };
+      }),
+    );
   };
 
   const removeStop = (stopId) => {
-    setDraft((current) => ({
-      ...current,
-      route: {
-        ...current.route,
-        stops: current.route.stops.filter((stop) => stop.id !== stopId),
-      },
-      returnRoute: current.returnRouteEnabled
-        ? buildMirroredReturnRoute({
-            ...current.route,
-            stops: current.route.stops.filter((stop) => stop.id !== stopId),
-          })
-        : current.returnRoute,
-    }));
+    setDraft((current) =>
+      patchDraftRoute(current, editingRouteKey, (route) => ({
+        ...route,
+        stops: route.stops.filter((stop) => stop.id !== stopId),
+      })),
+    );
   };
 
   const updateSchedule = (scheduleId, field, value) => {
@@ -1247,6 +1440,21 @@ const BusServiceManager = ({
   const handleSave = async () => {
     if (!draft.operatorName.trim() || !draft.busName.trim() || !draft.route.originCity.trim() || !draft.route.destinationCity.trim()) {
       toast.error('Add operator, bus name, origin and destination first.');
+      return;
+    }
+
+    if (Object.keys(seatNumberProblems).length) {
+      toast.error('Fix the seat numbers shown in red first.');
+      return;
+    }
+
+    const incompleteRoute = (draft.extraRoutes || []).find(
+      (item) => !String(item.originCity || '').trim() || !String(item.destinationCity || '').trim(),
+    );
+    if (incompleteRoute) {
+      setActiveRouteKey(incompleteRoute.id);
+      openFormStep(3);
+      toast.error(`${getRouteLabel(draft, incompleteRoute.id)} needs an origin and destination city.`);
       return;
     }
 
@@ -2442,12 +2650,55 @@ const BusServiceManager = ({
             <div className="mb-8 flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
               <div>
                 <h2 className="text-xl font-bold tracking-tight text-slate-900">Seat Blueprint</h2>
-                <p className="mt-1 text-xs font-medium text-slate-500">Build a RedBus-style coach map, customize seat counts, and block inventory visually.</p>
+                <p className="mt-1 text-xs font-medium text-slate-500">Lay out the coach, set seat counts per deck, and block seats from sale.</p>
               </div>
               <div className="rounded-2xl bg-slate-50 px-4 py-3 text-sm font-bold text-slate-900">
                 {totalSeats} Seats
               </div>
             </div>
+
+            {/* Each bus is shown in the apps and website the way this says. */}
+            <div className="mb-5 rounded-2xl border border-slate-100 bg-slate-50/70 p-4">
+              <p className="text-sm font-bold text-slate-900">Seat layout view</p>
+              <p className="mt-0.5 text-[11px] font-medium text-slate-500">How riders see this bus's seats in the app and on the website.</p>
+              <div className="mt-3 flex flex-wrap gap-3">
+                {[
+                  { key: 'horizontal', label: 'Horizontal', hint: 'Bus on its side, front at the left' },
+                  { key: 'vertical', label: 'Vertical', hint: 'Bus upright, front at the top' },
+                ].map((option) => {
+                  const active = (draft.blueprint?.seatLayoutOrientation || 'horizontal') === option.key;
+                  return (
+                    <button
+                      key={option.key}
+                      type="button"
+                      onClick={() => setSeatLayoutOrientation(option.key)}
+                      className={`rounded-2xl border px-4 py-3 text-left transition-all ${
+                        active ? 'border-amber-200 bg-amber-50 text-slate-900 shadow-md shadow-amber-100' : 'border-slate-200 bg-white text-slate-500 hover:border-slate-300'
+                      }`}
+                    >
+                      <p className="text-sm font-bold">{option.label}</p>
+                      <p className={`mt-0.5 text-[10px] font-medium ${active ? 'text-amber-900/70' : 'text-slate-400'}`}>{option.hint}</p>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {allowSeatNumbering ? (
+              <SeatNumberingPanel
+                key={draft.id}
+                blueprint={draft.blueprint}
+                onChange={(blueprint) => setDraft((current) => ({ ...current, blueprint }))}
+                method={seatNumberMethod}
+                onMethodChange={(method) => {
+                  setSeatNumberMethod(method);
+                  setNumberingSeatId('');
+                }}
+                selectedSeatId={numberingSeatId}
+                onSelectSeat={setNumberingSeatId}
+                upcomingBookings={upcomingBusBookings}
+              />
+            ) : null}
 
             <div className="mb-5 flex flex-wrap gap-3">
             {BUS_BLUEPRINT_TEMPLATES.map((template) => {
@@ -2488,9 +2739,39 @@ const BusServiceManager = ({
               />
             </div>
 
-            <div className="grid gap-5 xl:grid-cols-2">
-              <SeatDeckPreview title="Lower Deck" deckRows={draft.blueprint.lowerDeck} onToggleSeat={toggleSeatStatus} />
-              <SeatDeckPreview title="Upper Deck" deckRows={draft.blueprint.upperDeck} onToggleSeat={toggleSeatStatus} />
+            <div className="rounded-2xl border border-slate-200 bg-white p-4">
+              <button
+                type="button"
+                aria-pressed={markingLadiesSeats}
+                onClick={() => setMarkingLadiesSeats((current) => !current)}
+                className={`mb-3 rounded-xl border px-3 py-2 text-xs font-bold transition ${
+                  markingLadiesSeats ? 'bus-seat-ladies' : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
+                }`}
+              >
+                {markingLadiesSeats ? 'Done marking ladies seats' : 'Mark ladies seats'}
+              </button>
+              <p className="mb-3 text-[11px] font-semibold text-slate-500">
+                {markingLadiesSeats
+                  ? 'Tap a seat or berth to make it a pink ladies seat, tap again to undo. Only a woman can book it.'
+                  : seatNumberMethod === 'manual'
+                  ? 'Click a seat or berth to type its number.'
+                  : 'Shown the way riders will see it. Tap a seat or berth to block it from sale, tap again to reopen it.'}
+              </p>
+              <HorizontalSeatMap
+                blueprint={draft.blueprint}
+                legend="editor"
+                getSeat={(cell) => ({
+                  status: cell.status === 'blocked' ? 'blocked' : 'available',
+                  invalid: Boolean(seatNumberProblems[cell.id]),
+                  active: seatNumberMethod === 'manual' && numberingSeatId === cell.id,
+                  title: seatNumberProblems[cell.id],
+                })}
+                onSeatClick={(cell) => {
+                  if (markingLadiesSeats) toggleLadiesSeat(cell.id);
+                  else if (seatNumberMethod === 'manual') setNumberingSeatId(cell.id);
+                  else toggleSeatStatus(cell.id);
+                }}
+              />
             </div>
 
             <div className="mt-5 flex flex-wrap gap-4 text-xs font-semibold text-slate-500">
@@ -2513,21 +2794,71 @@ const BusServiceManager = ({
           {currentFormStepIndex === 3 ? (
           <>
           <section className="rounded-3xl border border-slate-100 bg-white p-6 shadow-sm">
-            <div className="mb-8 flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+            <div className="mb-6 flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
               <div>
                 <h2 className="text-xl font-bold tracking-tight text-slate-900">Route Assignment</h2>
-                <p className="mt-1 text-xs font-medium text-slate-500">Manage stops, distance and route timings.</p>
+                <p className="mt-1 text-xs font-medium text-slate-500">
+                  Add boarding and drop points. Distance, duration and timings fill in automatically.
+                </p>
               </div>
-              <button
-                type="button"
-                onClick={addStop}
-                className="inline-flex items-center gap-2 rounded-2xl bg-slate-900 px-4 py-3 text-sm font-bold text-white shadow-md transition-all active:scale-95"
-              >
-                <Plus size={16} />
-                Add Stop
-              </button>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={addExtraRoute}
+                  className="inline-flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-bold text-slate-800 shadow-sm transition-all hover:bg-slate-50 active:scale-95"
+                >
+                  <Route size={16} />
+                  Add Extra Route
+                </button>
+                <button
+                  type="button"
+                  onClick={addStop}
+                  className="inline-flex items-center gap-2 rounded-2xl bg-slate-900 px-4 py-3 text-sm font-bold text-white shadow-md transition-all active:scale-95"
+                >
+                  <Plus size={16} />
+                  Add Stop
+                </button>
+              </div>
             </div>
 
+            {editableRoutes.length > 1 ? (
+              <div className="mb-6 flex flex-wrap gap-2">
+                {editableRoutes.map(({ key, route }) => {
+                  const selected = key === editingRouteKey;
+                  return (
+                    <div
+                      key={key}
+                      className={`inline-flex items-center rounded-2xl border transition ${
+                        selected
+                          ? 'border-slate-900 bg-slate-900 text-white shadow-md'
+                          : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300'
+                      }`}
+                    >
+                      <button type="button" onClick={() => setActiveRouteKey(key)} className="px-4 py-2.5 text-left">
+                        <span className={`block text-[10px] font-black uppercase tracking-[0.16em] ${selected ? 'text-slate-300' : 'text-slate-400'}`}>
+                          {getRouteLabel(draft, key)}
+                        </span>
+                        <span className="block text-sm font-bold">{describeRoute(route)}</span>
+                      </button>
+                      {key !== 'main' ? (
+                        <button
+                          type="button"
+                          onClick={() => removeExtraRoute(key)}
+                          aria-label={`Remove ${getRouteLabel(draft, key)}`}
+                          className={`mr-2 rounded-xl p-1.5 transition ${
+                            selected ? 'text-slate-300 hover:text-white' : 'text-slate-400 hover:bg-rose-50 hover:text-rose-500'
+                          }`}
+                        >
+                          <X size={14} />
+                        </button>
+                      ) : null}
+                    </div>
+                  );
+                })}
+              </div>
+            ) : null}
+
+            {editingRouteKey === 'main' ? (
             <div className="mb-6 rounded-[28px] border border-slate-200 bg-slate-50/70 p-5">
               <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
                 <div>
@@ -2556,19 +2887,35 @@ const BusServiceManager = ({
                 </button>
               </div>
             </div>
+            ) : null}
 
-            <div className="grid gap-5 xl:grid-cols-[minmax(0,1.15fr)_420px]">
+            <div key={editingRouteKey} className="grid gap-5 2xl:grid-cols-[minmax(0,1.15fr)_420px]">
               <div>
                 <div className="grid gap-5 md:grid-cols-2">
                   <div>
                     <label className={labelClassName}>Route Name</label>
-                    <input className={fieldClassName} value={draft.route.routeName} onChange={(event) => updateRouteField('routeName', event.target.value)} placeholder="Indore to Bhopal Night Corridor" />
+                    <input className={fieldClassName} value={activeRoute.routeName} onChange={(event) => updateRouteField('routeName', event.target.value)} placeholder="Indore to Bhopal Night Corridor" />
                   </div>
                   <div>
-                    <label className={labelClassName}>Distance / Duration</label>
+                    <div className="mb-1 flex items-center justify-between gap-2">
+                      <span className="text-[10px] font-bold text-slate-500">Distance / Duration</span>
+                      <button
+                        type="button"
+                        onClick={() => setRouteAutoTimings(editingRouteKey, activeRoute.autoTimings === false)}
+                        title={activeRoute.autoTimings === false ? 'Switch back to automatic distance and timings' : 'Switch to typing values by hand'}
+                        className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-[10px] font-black uppercase tracking-wider transition ${
+                          activeRoute.autoTimings === false
+                            ? 'border-slate-200 bg-white text-slate-500 hover:border-slate-300'
+                            : 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                        }`}
+                      >
+                        <Sparkles size={11} />
+                        {activeRoute.autoTimings === false ? 'Manual · use auto' : 'Auto'}
+                      </button>
+                    </div>
                     <div className="grid grid-cols-2 gap-3">
-                      <input className={fieldClassName} value={draft.route.distanceKm} onChange={(event) => updateRouteField('distanceKm', event.target.value)} placeholder="195 km" />
-                      <input className={fieldClassName} value={draft.route.durationHours} onChange={(event) => updateRouteField('durationHours', event.target.value)} placeholder="4h 45m" />
+                      <input className={fieldClassName} value={activeRoute.distanceKm} onChange={(event) => updateRouteField('distanceKm', event.target.value)} placeholder="195 km" />
+                      <input className={fieldClassName} value={activeRoute.durationHours} onChange={(event) => updateRouteField('durationHours', event.target.value)} placeholder="4h 45m" />
                     </div>
                   </div>
                   <div>
@@ -2585,7 +2932,7 @@ const BusServiceManager = ({
                       >
                         <input
                           className={fieldClassName}
-                          value={draft.route.originCity}
+                          value={activeRoute.originCity}
                           onChange={(event) => updateRouteField('originCity', event.target.value)}
                           placeholder="Search origin city in India"
                         />
@@ -2593,14 +2940,14 @@ const BusServiceManager = ({
                     ) : (
                       <input
                         className={fieldClassName}
-                        value={draft.route.originCity}
+                        value={activeRoute.originCity}
                         onChange={(event) => updateRouteField('originCity', event.target.value)}
                         placeholder="Indore"
                       />
                     )}
                     <p className="mt-2 text-[11px] font-semibold text-slate-500">
-                      {draft.route.originCoords
-                        ? `Coords: ${draft.route.originCoords.lat.toFixed(5)}, ${draft.route.originCoords.lng.toFixed(5)}`
+                      {toCoords(activeRoute.originCoords)
+                        ? `Coords: ${activeRoute.originCoords.lat.toFixed(5)}, ${activeRoute.originCoords.lng.toFixed(5)}`
                         : 'Indian city suggestions only. Select one to store live-tracking coordinates.'}
                     </p>
                   </div>
@@ -2618,7 +2965,7 @@ const BusServiceManager = ({
                       >
                         <input
                           className={fieldClassName}
-                          value={draft.route.destinationCity}
+                          value={activeRoute.destinationCity}
                           onChange={(event) => updateRouteField('destinationCity', event.target.value)}
                           placeholder="Search destination city in India"
                         />
@@ -2626,17 +2973,22 @@ const BusServiceManager = ({
                     ) : (
                       <input
                         className={fieldClassName}
-                        value={draft.route.destinationCity}
+                        value={activeRoute.destinationCity}
                         onChange={(event) => updateRouteField('destinationCity', event.target.value)}
                         placeholder="Bhopal"
                       />
                     )}
                     <p className="mt-2 text-[11px] font-semibold text-slate-500">
-                      {draft.route.destinationCoords
-                        ? `Coords: ${draft.route.destinationCoords.lat.toFixed(5)}, ${draft.route.destinationCoords.lng.toFixed(5)}`
+                      {toCoords(activeRoute.destinationCoords)
+                        ? `Coords: ${activeRoute.destinationCoords.lat.toFixed(5)}, ${activeRoute.destinationCoords.lng.toFixed(5)}`
                         : 'Indian city suggestions only. Select one to store live-tracking coordinates.'}
                     </p>
                   </div>
+                </div>
+
+                <div className={`mt-5 flex items-start gap-2 rounded-2xl border px-4 py-3 text-xs font-semibold ${autoStatus.className}`}>
+                  <Sparkles size={14} className="mt-0.5 shrink-0" />
+                  <span>{autoStatus.text}</span>
                 </div>
               </div>
 
@@ -2645,11 +2997,11 @@ const BusServiceManager = ({
                   <div>
                     <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Route Preview</p>
                     <h3 className="mt-1 text-sm font-black text-slate-900">
-                      {draft.route.originCity || 'Origin'} to {draft.route.destinationCity || 'Destination'}
+                      {activeRoute.originCity || 'Origin'} to {activeRoute.destinationCity || 'Destination'}
                     </h3>
                   </div>
                   <div className="rounded-full border border-slate-200 bg-white px-3 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-500">
-                    Polyline
+                    {activeRoute.distanceKm || 'Polyline'}
                   </div>
                 </div>
 
@@ -2672,12 +3024,30 @@ const BusServiceManager = ({
                           fullscreenControl: false,
                         }}
                       >
-                        {toCoords(draft.route.originCoords) ? (
-                          <MarkerF position={draft.route.originCoords} label={{ text: 'A', color: '#ffffff', fontWeight: '700' }} />
+                        {toCoords(activeRoute.originCoords) ? (
+                          <MarkerF position={toCoords(activeRoute.originCoords)} label={{ text: 'A', color: '#ffffff', fontWeight: '700' }} />
                         ) : null}
-                        {toCoords(draft.route.destinationCoords) ? (
-                          <MarkerF position={draft.route.destinationCoords} label={{ text: 'B', color: '#ffffff', fontWeight: '700' }} />
+                        {toCoords(activeRoute.destinationCoords) ? (
+                          <MarkerF position={toCoords(activeRoute.destinationCoords)} label={{ text: 'B', color: '#ffffff', fontWeight: '700' }} />
                         ) : null}
+                        {activeRoute.stops.map((stop, index) =>
+                          toCoords(stop.coords) ? (
+                            <MarkerF
+                              key={stop.id}
+                              position={toCoords(stop.coords)}
+                              title={getStopQuery(stop)}
+                              label={{ text: String(index + 1), color: '#ffffff', fontWeight: '700', fontSize: '11px' }}
+                              icon={{
+                                path: window.google.maps.SymbolPath.CIRCLE,
+                                scale: 9,
+                                fillColor: '#4f46e5',
+                                fillOpacity: 1,
+                                strokeColor: '#ffffff',
+                                strokeWeight: 2,
+                              }}
+                            />
+                          ) : null,
+                        )}
                         {routePolylinePath.length >= 2 ? (
                           <Polyline
                             path={routePolylinePath}
@@ -2701,17 +3071,17 @@ const BusServiceManager = ({
                 <div className="mt-3 grid grid-cols-2 gap-3">
                   <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3">
                     <p className="text-[10px] font-black uppercase tracking-wider text-slate-400">Start</p>
-                    <p className="mt-1 text-sm font-bold text-slate-900">{draft.route.originCity || 'Not set'}</p>
+                    <p className="mt-1 text-sm font-bold text-slate-900">{activeRoute.originCity || 'Not set'}</p>
                   </div>
                   <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3">
                     <p className="text-[10px] font-black uppercase tracking-wider text-slate-400">End</p>
-                    <p className="mt-1 text-sm font-bold text-slate-900">{draft.route.destinationCity || 'Not set'}</p>
+                    <p className="mt-1 text-sm font-bold text-slate-900">{activeRoute.destinationCity || 'Not set'}</p>
                   </div>
                 </div>
               </div>
             </div>
 
-            {draft.returnRouteEnabled ? (
+            {editingRouteKey === 'main' && draft.returnRouteEnabled ? (
               <div className="mt-6 rounded-[28px] border border-emerald-100 bg-emerald-50/70 p-5">
                 <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                   <div>
@@ -2725,6 +3095,7 @@ const BusServiceManager = ({
                   </div>
                   <div className="rounded-2xl border border-emerald-100 bg-white/90 px-4 py-3 text-sm font-bold text-slate-900">
                     {draft.returnRoute.stops.length} return stops
+                    {draft.returnRoute.durationHours ? ` · ${draft.returnRoute.distanceKm} · ${draft.returnRoute.durationHours}` : ''}
                   </div>
                 </div>
 
@@ -2738,42 +3109,99 @@ const BusServiceManager = ({
                     <p className="mt-2 text-sm font-black text-slate-900">{draft.returnRoute.destinationCity || 'Not generated yet'}</p>
                   </div>
                 </div>
+                <p className="mt-3 text-[11px] font-semibold text-emerald-700">
+                  Pick &quot;Return route&quot; on a schedule below to sell it; its stop timings follow that schedule.
+                </p>
               </div>
             ) : null}
 
             <div className="mt-6 space-y-4">
-              {draft.route.stops.map((stop, index) => (
+              {activeRoute.stops.map((stop, index) => {
+                const located = Boolean(toCoords(stop.coords));
+                return (
                 <div key={stop.id} className="rounded-[26px] border border-slate-200 bg-slate-50/60 p-4">
                   <div className="mb-4 flex items-center justify-between">
                     <div className="flex items-center gap-3">
-                      <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-white text-indigo-600 shadow-sm">
+                      <div className={`flex h-10 w-10 items-center justify-center rounded-2xl bg-white shadow-sm ${located ? 'text-emerald-600' : 'text-indigo-600'}`}>
                         <MapPin size={16} />
                       </div>
                       <div>
                         <p className="text-sm font-black text-slate-900">Stop {index + 1}</p>
-                        <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Pickup / drop configuration</p>
+                        <p className={`text-[11px] font-semibold uppercase tracking-wide ${located ? 'text-emerald-600' : 'text-slate-400'}`}>
+                          {located
+                            ? 'On the map'
+                            : getStopQuery(stop)
+                              ? 'Not on the map yet. Pick a suggestion.'
+                              : 'Pickup / drop configuration'}
+                        </p>
                       </div>
                     </div>
-                    {draft.route.stops.length > 2 && (
-                      <button type="button" onClick={() => removeStop(stop.id)} className="rounded-2xl border border-rose-200 bg-white p-2 text-rose-500 transition hover:bg-rose-50">
-                        <Trash2 size={16} />
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => moveStop(stop.id, -1)}
+                        disabled={index === 0}
+                        aria-label="Move stop up"
+                        className="rounded-2xl border border-slate-200 bg-white p-2 text-slate-500 transition hover:bg-slate-50 disabled:opacity-40"
+                      >
+                        <ChevronUp size={16} />
                       </button>
-                    )}
+                      <button
+                        type="button"
+                        onClick={() => moveStop(stop.id, 1)}
+                        disabled={index === activeRoute.stops.length - 1}
+                        aria-label="Move stop down"
+                        className="rounded-2xl border border-slate-200 bg-white p-2 text-slate-500 transition hover:bg-slate-50 disabled:opacity-40"
+                      >
+                        <ChevronDown size={16} />
+                      </button>
+                      {activeRoute.stops.length > 2 && (
+                        <button type="button" onClick={() => removeStop(stop.id)} aria-label="Remove stop" className="rounded-2xl border border-rose-200 bg-white p-2 text-rose-500 transition hover:bg-rose-50">
+                          <Trash2 size={16} />
+                        </button>
+                      )}
+                    </div>
                   </div>
 
                   <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
-                    <input className={fieldClassName} value={stop.city} onChange={(event) => updateStop(stop.id, 'city', event.target.value)} placeholder="City" />
-                    <input className={fieldClassName} value={stop.pointName} onChange={(event) => updateStop(stop.id, 'pointName', event.target.value)} placeholder="Pickup / Drop Point" />
-                    <select className={fieldClassName} value={stop.stopType} onChange={(event) => updateStop(stop.id, 'stopType', event.target.value)}>
-                      <option value="pickup">Pickup Only</option>
-                      <option value="drop">Drop Only</option>
-                      <option value="both">Pickup + Drop</option>
-                    </select>
-                    <input className={fieldClassName} type="time" value={stop.arrivalTime} onChange={(event) => updateStop(stop.id, 'arrivalTime', event.target.value)} />
-                    <input className={fieldClassName} type="time" value={stop.departureTime} onChange={(event) => updateStop(stop.id, 'departureTime', event.target.value)} />
+                    <div>
+                      <label className={labelClassName}>City</label>
+                      <input className={fieldClassName} value={stop.city} onChange={(event) => updateStop(stop.id, 'city', event.target.value)} placeholder="City" />
+                    </div>
+                    <div>
+                      <label className={labelClassName}>Boarding / Drop Point</label>
+                      {canUsePlacesAutocomplete ? (
+                        <Autocomplete
+                          onLoad={(autocomplete) => registerAutocomplete(`stop:${stop.id}`, autocomplete)}
+                          onPlaceChanged={() => handleStopPlaceChanged(stop.id)}
+                          options={{ componentRestrictions: { country: 'in' }, fields: CITY_AUTOCOMPLETE_FIELDS }}
+                        >
+                          <input className={fieldClassName} value={stop.pointName} onChange={(event) => updateStop(stop.id, 'pointName', event.target.value)} placeholder="Search bus stand, square…" />
+                        </Autocomplete>
+                      ) : (
+                        <input className={fieldClassName} value={stop.pointName} onChange={(event) => updateStop(stop.id, 'pointName', event.target.value)} placeholder="Pickup / Drop Point" />
+                      )}
+                    </div>
+                    <div>
+                      <label className={labelClassName}>Type</label>
+                      <select className={fieldClassName} value={stop.stopType} onChange={(event) => updateStop(stop.id, 'stopType', event.target.value)}>
+                        <option value="pickup">Pickup Only</option>
+                        <option value="drop">Drop Only</option>
+                        <option value="both">Pickup + Drop</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className={labelClassName}>Arrives</label>
+                      <input className={fieldClassName} type="time" value={stop.arrivalTime} onChange={(event) => updateStop(stop.id, 'arrivalTime', event.target.value)} />
+                    </div>
+                    <div>
+                      <label className={labelClassName}>Leaves</label>
+                      <input className={fieldClassName} type="time" value={stop.departureTime} onChange={(event) => updateStop(stop.id, 'departureTime', event.target.value)} />
+                    </div>
                   </div>
                 </div>
-              ))}
+                );
+              })}
             </div>
           </section>
 
@@ -2812,6 +3240,23 @@ const BusServiceManager = ({
                       </button>
                     )}
                   </div>
+
+                  {listDraftRoutes(draft).length > 1 ? (
+                    <div className="mb-4">
+                      <label className={labelClassName}>Runs On</label>
+                      <select
+                        className={fieldClassName}
+                        value={schedule.routeKey || 'main'}
+                        onChange={(event) => updateSchedule(schedule.id, 'routeKey', event.target.value)}
+                      >
+                        {listDraftRoutes(draft).map(({ key, route }) => (
+                          <option key={key} value={key}>
+                            {getRouteLabel(draft, key)}: {describeRoute(route)}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  ) : null}
 
                   <div className="grid gap-4 md:grid-cols-4">
                     <input className={fieldClassName} value={schedule.label} onChange={(event) => updateSchedule(schedule.id, 'label', event.target.value)} placeholder="Daily Evening Service" />

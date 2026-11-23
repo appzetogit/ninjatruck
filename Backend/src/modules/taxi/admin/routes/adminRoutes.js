@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { authenticate } from '../../middlewares/authMiddleware.js';
+import { enforceAdminReadOnly } from '../../middlewares/adminReadOnlyMiddleware.js';
 import {
   loginRateLimit,
   otpSendRateLimit,
@@ -13,6 +14,7 @@ import {
   approveServiceStoreSignup,
   createAirport,
   createAdminAccount,
+  getAdminActivitySummary,
   createAdminBusBooking,
   createBusService,
   createAppModule,
@@ -36,7 +38,16 @@ import {
   createRentalVehicleType,
   createSetPrice,
   createSubscriptionPlan,
+  updateSubscriptionPlan,
+  deleteSubscriptionPlan,
+  getDriverSubscriptionPayments,
   createCustomerSubscriptionPlan,
+  updateCustomerSubscriptionPlan,
+  updateDriverSubscriptionExpiry,
+  updateUserSubscriptionExpiry,
+  getBusVendorWallets,
+  getBusVendorWalletTransactions,
+  adjustBusVendorWallet,
   createUser,
   createZone,
   bulkImportUsers,
@@ -51,6 +62,8 @@ import {
   deleteRentalPackageType,
   deleteLanguage,
   deleteOngoingRide,
+  cancelRideRequest,
+  deleteRideRequest,
   deleteOwner,
   deleteOwnerBooking,
   deleteOwnerNeededDocument,
@@ -75,7 +88,15 @@ import {
   getAdminBusBookingCalendar,
   getAdminBusBookings,
   getAdminEarnings,
+  getAdminEarningDetails,
   getAirports,
+  getPriceHikes,
+  getAutomaticSurge,
+  updateAutomaticSurge,
+  resetVehicleAutomaticSurge,
+  createPriceHike,
+  updatePriceHike,
+  deletePriceHike,
   getPendingBusDriverSignups,
   getPendingServiceCenterStaffSignups,
   getPendingServiceStoreSignups,
@@ -90,7 +111,9 @@ import {
   getDriver,
   getDriverNeededDocument,
   getDriverNeededDocuments,
+  getDriverCancellationLimit,
   getDriverProfile,
+  resetDriverCancellationLimit,
   getDriverOnboarding,
   getDrivers,
   getDriverRatings,
@@ -158,7 +181,15 @@ import {
   permanentlyDeleteDeletedUser,
   restoreDeletedDriver,
   permanentlyDeleteDeletedDriver,
+  getAdminLandingContent,
+  getWebsiteEnquiries,
+  patchWebsiteEnquiry,
+  saveAdminLandingContent,
   getRideRequests,
+  getPayments,
+  getPaymentSubscribers,
+  getDriverSubscriptionAnalytics,
+  getPaymentInvoice,
   rejectUserDeletionRequest,
   rejectDriverDeletionRequest,
   rejectBusDriverSignup,
@@ -187,6 +218,7 @@ import {
   updateAirport,
   updateAdminAccount,
   updateBusService,
+  getBusServiceUpcomingBookings,
   updateDriver,
   updateEmployee,
   updateDriverNeededDocument,
@@ -198,6 +230,7 @@ import {
   updateGeneralSettingsCategory,
   updateLanguageStatus,
   updateMailSettings,
+  sendTestMail,
   updateMapSettings,
   updateRechargeApiSettings,
   updateOwner,
@@ -242,8 +275,15 @@ import {
   updatePoolingBookingStatus,
   uploadImage,
 } from '../controllers/poolingController.js';
+import {
+  createCancellationReason,
+  deleteCancellationReason,
+  listCancellationReasons,
+  updateCancellationReason,
+} from '../controllers/cancellationReasonController.js';
 import { promotionsRouter } from '../promotions/routes/index.js';
 import { listSafetyAlerts, resolveSafetyAlert } from '../../safety/controllers/safetyController.js';
+import { createTollPlaza, deleteTollPlaza, importTollPlazas, listTollPlazas, previewRouteTolls, updateTollPlaza } from '../controllers/tollController.js';
 
 export const adminRouter = Router();
 
@@ -257,10 +297,13 @@ adminRouter.post('/admin/reset-password', otpVerifyRateLimit, resetPassword);
 // Public route for app branding/settings
 adminRouter.get('/admin/general-settings/:category', getGeneralSettingsCategory);
 
-adminRouter.use('/admin', authenticate(['admin']));
+// View-only admins are stopped here for every /admin write - including the
+// bus, support, career and promotions routers mounted after this one.
+adminRouter.use('/admin', authenticate(['admin']), enforceAdminReadOnly());
 
 adminRouter.get('/admin/permissions', getAdminPermissions);
 adminRouter.get('/admin/admin-management/admins', getAdmins);
+adminRouter.get('/admin/admin-management/activity-summary', getAdminActivitySummary);
 adminRouter.post('/admin/admin-management/admins', createAdminAccount);
 adminRouter.patch('/admin/admin-management/admins/:id', updateAdminAccount);
 adminRouter.delete('/admin/admin-management/admins/:id', deleteAdminAccount);
@@ -295,6 +338,8 @@ adminRouter.patch('/admin/drivers/deleted/:id/restore', authenticate(['admin']),
 adminRouter.delete('/admin/drivers/deleted/:id', authenticate(['admin']), permanentlyDeleteDeletedDriver);
 adminRouter.post('/admin/drivers', createDriver);
 adminRouter.get('/admin/drivers/:id/profile', getDriverProfile);
+adminRouter.get('/admin/drivers/:id/cancellation-limit', getDriverCancellationLimit);
+adminRouter.post('/admin/drivers/:id/cancellation-limit/reset', resetDriverCancellationLimit);
 adminRouter.get('/admin/drivers/:id', getDriver);
 adminRouter.patch('/admin/drivers/:id', updateDriver);
 adminRouter.patch('/admin/drivers/update-password/:id', updateDriverPassword);
@@ -319,10 +364,22 @@ adminRouter.get('/admin/driver-ratings/:id', authenticate(['admin']), getDriverR
 
 adminRouter.get('/admin/driver-subscriptions/plans/list', getSubscriptionPlans);
 adminRouter.post('/admin/driver-subscriptions/plans/create', createSubscriptionPlan);
+adminRouter.patch('/admin/driver-subscriptions/plans/:id', updateSubscriptionPlan);
+adminRouter.delete('/admin/driver-subscriptions/plans/:id', deleteSubscriptionPlan);
+adminRouter.get('/admin/driver-subscriptions/payments', getDriverSubscriptionPayments);
+adminRouter.get('/admin/driver-subscriptions/analytics', getDriverSubscriptionAnalytics);
 adminRouter.get('/admin/driver-subscriptions/settings', getSubscriptionSettings);
 adminRouter.post('/admin/driver-subscriptions/settings', updateSubscriptionSettings);
 adminRouter.get('/admin/user-subscriptions/plans/list', getCustomerSubscriptionPlans);
 adminRouter.post('/admin/user-subscriptions/plans/create', createCustomerSubscriptionPlan);
+adminRouter.patch('/admin/user-subscriptions/plans/:id', updateCustomerSubscriptionPlan);
+// Change when a bought pass or plan ends (extend, shorten, end now).
+adminRouter.patch('/admin/driver-subscriptions/passes/:id/expiry', updateDriverSubscriptionExpiry);
+adminRouter.patch('/admin/user-subscriptions/:id/expiry', updateUserSubscriptionExpiry);
+// Bus vendors' prepaid wallets.
+adminRouter.get('/admin/bus-vendor-wallets', getBusVendorWallets);
+adminRouter.get('/admin/bus-vendor-wallets/:type/:id/transactions', getBusVendorWalletTransactions);
+adminRouter.post('/admin/bus-vendor-wallets/:type/:id/adjust', adjustBusVendorWallet);
 
 adminRouter.get('/countries', getCountries);
 adminRouter.get('/admin/countries', getCountries);
@@ -360,6 +417,7 @@ adminRouter.patch('/admin/airports/:id', updateAirport);
 adminRouter.delete('/admin/airports/:id', deleteAirport);
 adminRouter.get('/admin/bus-services', getBusServices);
 adminRouter.get('/admin/bus-services/pending-drivers', getPendingBusDriverSignups);
+adminRouter.get('/admin/bus-services/:id/upcoming-bookings', getBusServiceUpcomingBookings);
 adminRouter.post('/admin/bus-services', createBusService);
 adminRouter.patch('/admin/bus-services/:id', updateBusService);
 adminRouter.patch('/admin/bus-services/pending-drivers/:id/approve', approveBusDriverSignup);
@@ -439,6 +497,7 @@ adminRouter.get('/admin/referral/dashboard', getReferralDashboard);
 adminRouter.get('/admin/dashboard/data', getDashboardData);
 
 adminRouter.get('/admin/dashboard/admin-earnings', getAdminEarnings);
+adminRouter.get('/admin/dashboard/admin-earnings/details', getAdminEarningDetails);
 adminRouter.get('/admin/dashboard/overall-earnings', getOverallEarnings);
 adminRouter.get('/admin/dashboard/today-earnings', getTodayEarnings);
 adminRouter.get('/admin/dashboard/cancel-chart', getCancelChart);
@@ -446,6 +505,23 @@ adminRouter.get('/admin/safety/alerts', authenticate(['admin']), listSafetyAlert
 adminRouter.patch('/admin/safety/alerts/:id/resolve', authenticate(['admin']), resolveSafetyAlert);
 adminRouter.get('/admin/ongoing-rides', getOngoingRides);
 adminRouter.get('/admin/ride-requests', getRideRequests);
+// One ledger of every payment, and an invoice PDF for each.
+adminRouter.get('/admin/payments', getPayments);
+// Toll plazas and per-vehicle toll prices for outstation trips.
+adminRouter.get('/admin/tolls', listTollPlazas);
+adminRouter.get('/admin/tolls/preview', previewRouteTolls);
+adminRouter.post('/admin/tolls', createTollPlaza);
+adminRouter.post('/admin/tolls/import', importTollPlazas);
+adminRouter.patch('/admin/tolls/:id', updateTollPlaza);
+adminRouter.delete('/admin/tolls/:id', deleteTollPlaza);
+adminRouter.get('/admin/payments/subscribers', getPaymentSubscribers);
+adminRouter.get('/admin/payments/:kind/:id/invoice', getPaymentInvoice);
+adminRouter.post('/admin/ride-requests/:id/cancel', cancelRideRequest);
+adminRouter.delete('/admin/ride-requests/:id', deleteRideRequest);
+adminRouter.get('/admin/enquiries', getWebsiteEnquiries);
+adminRouter.patch('/admin/enquiries/:id', patchWebsiteEnquiry);
+adminRouter.get('/admin/landing-content', getAdminLandingContent);
+adminRouter.put('/admin/landing-content', saveAdminLandingContent);
 adminRouter.delete('/admin/ongoing-rides/:id', deleteOngoingRide);
 adminRouter.get('/admin/deliveries', getDeliveries);
 adminRouter.get('/admin/trips', getIntercityTrips);
@@ -497,6 +573,7 @@ adminRouter.get('/admin/integration-settings/map', getMapSettings);
 adminRouter.patch('/admin/integration-settings/map', updateMapSettings);
 adminRouter.get('/admin/integration-settings/mail', getMailSettings);
 adminRouter.patch('/admin/integration-settings/mail', updateMailSettings);
+adminRouter.post('/admin/integration-settings/mail/test', sendTestMail);
 adminRouter.get('/admin/integration-settings/recharge-api', getRechargeApiSettings);
 adminRouter.patch('/admin/integration-settings/recharge-api', updateRechargeApiSettings);
 adminRouter.post('/admin/integration-settings/recharge-api/generate-token', generateRechargeApiToken);
@@ -505,10 +582,17 @@ adminRouter.post('/admin/integration-settings/recharge-api/test', runRechargeApi
 adminRouter.get('/admin/general-settings/:category', getGeneralSettingsCategory);
 adminRouter.patch('/admin/general-settings/:category', updateGeneralSettingsCategory);
 
+adminRouter.get('/admin/cancellation-reasons', listCancellationReasons);
+adminRouter.post('/admin/cancellation-reasons', createCancellationReason);
+adminRouter.patch('/admin/cancellation-reasons/:id', updateCancellationReason);
+adminRouter.delete('/admin/cancellation-reasons/:id', deleteCancellationReason);
+
 adminRouter.get('/on-boarding', getUserOnboarding);
-adminRouter.post('/on-boarding', createOnboardingScreen);
-adminRouter.patch('/on-boarding/:id', updateOnboardingScreen);
-adminRouter.delete('/on-boarding/:id', deleteOnboardingScreen);
+// The apps read onboarding screens without signing in; changing them is admin
+// only (these were open to anyone).
+adminRouter.post('/on-boarding', authenticate(['admin']), enforceAdminReadOnly(), createOnboardingScreen);
+adminRouter.patch('/on-boarding/:id', authenticate(['admin']), enforceAdminReadOnly(), updateOnboardingScreen);
+adminRouter.delete('/on-boarding/:id', authenticate(['admin']), enforceAdminReadOnly(), deleteOnboardingScreen);
 adminRouter.get('/on-boarding-driver', getDriverOnboarding);
 adminRouter.get('/on-boarding-owner', getOwnerOnboarding);
 
@@ -520,3 +604,12 @@ adminRouter.get('/admin/reports/finance/download', downloadFinanceReport);
 adminRouter.get('/admin/reports/fleet-finance/download', downloadFleetFinanceReport);
 
 adminRouter.use('/', promotionsRouter);
+
+// Price hike (surge). Sits under the authenticate(['admin']) mount above.
+adminRouter.get('/admin/price-hikes', getPriceHikes);
+adminRouter.get('/admin/surge', getAutomaticSurge);
+adminRouter.patch('/admin/surge', updateAutomaticSurge);
+adminRouter.delete('/admin/surge/vehicles/:vehicleTypeId', resetVehicleAutomaticSurge);
+adminRouter.post('/admin/price-hikes', createPriceHike);
+adminRouter.patch('/admin/price-hikes/:id', updatePriceHike);
+adminRouter.delete('/admin/price-hikes/:id', deletePriceHike);

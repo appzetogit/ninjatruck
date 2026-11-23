@@ -13,6 +13,10 @@ const subscriptionPlanSchema = new mongoose.Schema({
   duration: Number, // in days
   transport_type: String,
   vehicle_type_id: { type: mongoose.Schema.Types.ObjectId, ref: 'TaxiVehicle' },
+  // Driver plans are priced per class of vehicle rather than per catalog
+  // entry - one ₹29 pass for bike and auto, one ₹49 pass for cars - so a new
+  // vehicle type does not need its own plan on the day it is added.
+  vehicle_classes: { type: [String], default: [] },
   benefit_type: {
     type: String,
     enum: ['standard', 'limited', 'unlimited'],
@@ -24,6 +28,11 @@ const subscriptionPlanSchema = new mongoose.Schema({
     min: 0,
   },
   how_it_works: String,
+  // Driver plans only: a new driver this plan covers gets this many days
+  // free, once, the first time they are able to drive. Turning it off stops
+  // new trials; trials already given run to their end.
+  free_trial_enabled: { type: Boolean, default: false },
+  free_trial_days: { type: Number, default: 0, min: 0 },
   active: { type: Boolean, default: true }
 }, { timestamps: true });
 

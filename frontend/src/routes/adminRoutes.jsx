@@ -7,14 +7,24 @@ import {
   AdminAirportManagement,
   AdminBannerImage,
   AdminBidRideSettings,
+  AdminDriverSubscriptionSettings,
   AdminBlockedFleetDrivers,
   AdminBusBookingManager,
+  AdminBusVendorWallets,
   AdminChat,
   AdminBusCommissionManager,
+  AdminZibusBookingChannels,
+  AdminZibusBusOperators,
+  AdminZibusDhabaOrders,
+  AdminZibusDhabaPartners,
+  AdminZibusFoodCategories,
+  AdminZibusSeatInventory,
   AdminBusServiceDetails,
   AdminBusServiceManager,
   AdminCareerApplications,
   AdminCMSBuilder,
+  AdminLandingContent,
+  AdminWebsiteEnquiries,
   AdminCountryManagement,
   AdminCreatePackagePrice,
   AdminCustomizationSettings,
@@ -42,6 +52,9 @@ import {
   AdminDriverSubscriptions,
   AdminDriverWallet,
   AdminEarnings,
+  AdminPayments,
+  AdminDriverSubscriptionAnalytics,
+  AdminEarningsDetail,
   AdminEmployeeCreate,
   AdminEmployeeDetails,
   AdminEmployeeList,
@@ -99,6 +112,8 @@ import {
   AdminPromoCodes,
   AdminReferralDashboard,
   AdminReferralTranslation,
+  AdminRewardSettings,
+  AdminRewardClaims,
   AdminRentalBookingRequests,
   AdminRentalCommissionManager,
   AdminRentalPackageTypes,
@@ -116,7 +131,10 @@ import {
   AdminSupportTickets,
   AdminSupportTicketTitle,
   AdminSurgePricing,
+  AdminPriceHike,
+  AdminTollCharges,
   AdminTipSettings,
+  AdminRideVoiceSettings,
   AdminTransportRideSettings,
   AdminTrips,
   AdminUserBulkUpload,
@@ -197,6 +215,9 @@ const adminRoutes = (
       <Route index element={<Navigate to="/admin/dashboard" />} />
       <Route path="dashboard" element={<AdminDashboard />} />
       <Route path="earnings" element={<AdminEarnings />} />
+      <Route path="earnings/:metric" element={<AdminEarningsDetail />} />
+      <Route path="payments" element={<AdminPayments />} />
+      <Route path="driver-subscription/analytics" element={<AdminDriverSubscriptionAnalytics />} />
       <Route path="chat" element={<AdminChat />} />
       <Route path="trips" element={<AdminTrips />} />
       <Route path="deliveries" element={<AdminDeliveries />} />
@@ -207,6 +228,18 @@ const adminRoutes = (
       <Route path="bus-service/edit/:id" element={<AdminBusServiceManager mode="edit" />} />
       <Route path="bus-service/commission" element={<AdminBusCommissionManager />} />
       <Route path="bus-service/bookings" element={<AdminBusBookingManager />} />
+      <Route path="bus-service/vendor-wallets" element={<AdminBusVendorWallets />} />
+      <Route path="bus-service/inventory" element={<AdminZibusSeatInventory />} />
+      <Route path="bus-service/operators" element={<AdminZibusBusOperators />} />
+      <Route path="bus-service/channels" element={<AdminZibusBookingChannels />} />
+      <Route path="bus-service/dhabas" element={<Navigate to="/admin/dhabas" replace />} />
+      <Route path="bus-service/dhaba-orders" element={<Navigate to="/admin/dhabas/orders" replace />} />
+      <Route path="dhabas" element={<AdminZibusDhabaPartners />} />
+      <Route path="dhabas/pending" element={<AdminZibusDhabaPartners />} />
+      <Route path="dhabas/rejected" element={<AdminZibusDhabaPartners />} />
+      <Route path="dhabas/payouts" element={<AdminZibusDhabaPartners />} />
+      <Route path="dhabas/orders" element={<AdminZibusDhabaOrders />} />
+      <Route path="dhabas/food-categories" element={<AdminZibusFoodCategories />} />
       <Route path="bus-service/:id" element={<AdminBusServiceDetails />} />
       <Route path="pooling" element={<Navigate to="/admin/pooling/routes" replace />} />
       <Route path="pooling/routes" element={<AdminPoolingManager />} />
@@ -224,6 +257,7 @@ const adminRoutes = (
       <Route path="users/create" element={<AdminUserCreate />} />
       <Route path="users/subscriptions" element={<AdminUserSubscriptions />} />
       <Route path="users/subscriptions/create" element={<AdminUserSubscriptionCreate />} />
+      <Route path="users/subscriptions/:planId/edit" element={<AdminUserSubscriptionCreate />} />
       <Route path="users/:id" element={<AdminUserDetails />} />
       <Route path="users/delete-requests" element={<AdminDeleteRequestUsers />} />
       <Route path="users/bulk-upload" element={<AdminUserBulkUpload />} />
@@ -259,6 +293,8 @@ const adminRoutes = (
       <Route path="referrals/user-settings" element={<AdminUserReferralSettings />} />
       <Route path="referrals/driver-settings" element={<AdminDriverReferralSettings />} />
       <Route path="referrals/translation" element={<AdminReferralTranslation />} />
+      <Route path="referrals/rewards" element={<AdminRewardSettings />} />
+      <Route path="referrals/reward-claims" element={<AdminRewardClaims />} />
       <Route path="promotions/promo-codes" element={<AdminPromoCodes />} />
       <Route path="promotions/promo-codes/create" element={<AdminPromoCodes />} />
       <Route path="promotions/promo-codes/edit/:id" element={<AdminPromoCodes />} />
@@ -360,12 +396,16 @@ const adminRoutes = (
         <Route path="package-pricing/edit/:packageId" element={<AdminCreatePackagePrice mode="edit" />} />
         <Route path="set-price/incentive/:id" element={<AdminDriverIncentive />} />
         <Route path="set-price/surge/:id" element={<AdminSurgePricing />} />
+        <Route path="price-hike" element={<AdminPriceHike />} />
+        <Route path="tolls" element={<AdminTollCharges />} />
         <Route path="goods-types" element={<AdminGoodsTypes />} />
         <Route path="goods-types/create" element={<AdminGoodsTypes mode="create" />} />
         <Route path="goods-types/edit/:id" element={<AdminGoodsTypes mode="edit" />} />
       </Route>
       <Route path="safety" element={<AdminSafetyCenter />} />
       <Route path="cms" element={<AdminCMSBuilder />} />
+      <Route path="settings/cms/landing" element={<AdminLandingContent />} />
+      <Route path="settings/cms/enquiries" element={<AdminWebsiteEnquiries />} />
       <Route path="settings/cms/header-footer" element={<AdminHeaderFooter />} />
       <Route path="support/ticket-title" element={<AdminSupportTicketTitle />} />
       <Route path="support/tickets" element={<AdminSupportTickets />} />
@@ -389,9 +429,11 @@ const adminRoutes = (
       <Route path="settings/business/customization" element={<AdminCustomizationSettings />} />
       <Route path="settings/business/transport-ride" element={<AdminTransportRideSettings />} />
       <Route path="settings/business/bid-ride" element={<AdminBidRideSettings />} />
+      <Route path="settings/business/driver-subscription" element={<AdminDriverSubscriptionSettings />} />
 
       <Route path="settings/app/wallet" element={<AdminWalletSettings />} />
       <Route path="settings/app/tip" element={<AdminTipSettings />} />
+      <Route path="settings/app/ride-voice" element={<AdminRideVoiceSettings />} />
       <Route path="settings/app/country" element={<AdminCountryManagement />} />
       <Route path="settings/app/onboard" element={<AdminOnboardingScreens />} />
 

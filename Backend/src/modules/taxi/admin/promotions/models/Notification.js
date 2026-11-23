@@ -20,6 +20,30 @@ const notificationSchema = new mongoose.Schema(
       trim: true,
       index: true,
     },
+    // Drivers-only pushes can be narrowed to these vehicle types; empty = every type.
+    vehicle_type_ids: {
+      type: [{ type: mongoose.Schema.Types.ObjectId, ref: 'TaxiVehicle' }],
+      default: [],
+    },
+    vehicle_type_names: {
+      type: [String],
+      default: [],
+    },
+    // Read out loud by the apps. Blank text means the message is read.
+    voice_enabled: {
+      type: Boolean,
+      default: false,
+    },
+    voice_text: {
+      type: String,
+      default: '',
+      trim: true,
+    },
+    voice_language: {
+      type: String,
+      default: 'en',
+      trim: true,
+    },
     push_title: {
       type: String,
       required: true,

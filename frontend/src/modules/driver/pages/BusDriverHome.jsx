@@ -24,6 +24,7 @@ import { useNavigate } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import { clearDriverAuthState, getCurrentDriver } from '../services/registrationService';
 import BusDriverBottomNav from '../components/BusDriverBottomNav';
+import HorizontalSeatMap from '../../admin/pages/bus-service/HorizontalSeatMap';
 import {
   createBusDriverReservation,
   getBusDriverBookings,
@@ -165,60 +166,6 @@ const countBlueprintSeats = (blueprint = {}) =>
     .flatMap((row) => (Array.isArray(row) ? row : []))
     .filter((cell) => cell?.kind === 'seat').length;
 
-const SeatDeck = ({ title, rows, selectedSeatIds, onToggle }) => {
-  if (!rows?.length) return null;
-
-  const maxColumns = Math.max(...rows.map((row) => row.length), 1);
-
-  return (
-    <section className="rounded-[28px] border border-slate-200 bg-white p-4 shadow-sm">
-      <div className="mb-4 flex items-center justify-between">
-        <h3 className="text-sm font-black text-slate-900">{title}</h3>
-        <span className="rounded-full bg-slate-50 px-3 py-1 text-[10px] font-bold uppercase tracking-[0.16em] text-slate-400">
-          Coach
-        </span>
-      </div>
-
-      <div className="space-y-3">
-        {rows.map((row, rowIndex) => (
-          <div
-            key={`${title}-${rowIndex}`}
-            className="grid gap-2"
-            style={{ gridTemplateColumns: `repeat(${Math.max(maxColumns, row.length)}, minmax(0, 1fr))` }}
-          >
-            {row.map((seat, cellIndex) => {
-              if (!seat || seat.kind !== 'seat') {
-                return <div key={`${title}-${rowIndex}-${cellIndex}`} className="h-10 rounded-xl bg-slate-100/70" />;
-              }
-
-              const isBooked = seat.status === 'booked';
-              const isSelected = selectedSeatIds.includes(seat.id);
-
-              return (
-                <button
-                  key={`${title}-${seat.id}`}
-                  type="button"
-                  disabled={isBooked}
-                  onClick={() => onToggle(seat)}
-                  className={`relative h-10 rounded-xl border text-[10px] font-black transition ${
-                    isBooked
-                      ? 'cursor-not-allowed border-slate-200 bg-slate-200 text-slate-500'
-                      : isSelected
-                        ? 'border-slate-950 bg-slate-950 text-white'
-                        : 'border-slate-200 bg-white text-slate-700 hover:border-slate-400'
-                  }`}
-                >
-                  <span className="absolute inset-x-2 top-1 h-1 rounded-full bg-slate-200/90" />
-                  {seat.label || seat.id}
-                </button>
-              );
-            })}
-          </div>
-        ))}
-      </div>
-    </section>
-  );
-};
 
 const StatCard = ({ label, value, tone = 'light', Icon }) => (
   <div className={`rounded-2xl p-4 ${tone === 'dark' ? 'bg-slate-900 text-white' : 'bg-white border border-slate-200 text-slate-900'} shadow-sm`}>
@@ -282,7 +229,12 @@ const BusDriverHome = () => {
   }, [navigate]);
 
   const busService = profile?.busService || null;
-  const schedules = Array.isArray(busService?.schedules) ? busService.schedules : [];
+  // Memoized: effects below depend on it, and a new [] on every render (a bus
+  // driver with no bus assigned) re-renders forever and freezes navigation.
+  const schedules = useMemo(
+    () => (Array.isArray(busService?.schedules) ? busService.schedules : []),
+    [busService],
+  );
   const routeStops = Array.isArray(busService?.route?.stops) ? busService.route.stops : [];
   const pickupStops = routeStops.filter((stop) => stop?.stopType === 'pickup' || stop?.stopType === 'both');
   const dropStops = routeStops.filter((stop) => stop?.stopType === 'drop' || stop?.stopType === 'both');
@@ -796,6 +748,18 @@ const BusDriverHome = () => {
 
       <button
         type="button"
+        onClick={() => navigate('/taxi/driver/bus-home/tickets')}
+        className="flex w-full items-center justify-between gap-3 rounded-[28px] bg-slate-950 p-5 text-left text-white shadow-sm"
+      >
+        <span>
+          <span className="block text-[11px] font-bold uppercase tracking-[0.18em] text-white/60">Boarding</span>
+          <span className="mt-1 block text-lg font-black">Check tickets by PNR or QR</span>
+        </span>
+        <Ticket size={22} className="shrink-0" />
+      </button>
+
+      <button
+        type="button"
         onClick={openLiveRoutePage}
         className="w-full rounded-[28px] border border-slate-200 bg-white p-5 text-left shadow-sm transition hover:border-slate-300"
       >
@@ -1175,18 +1139,16 @@ const BusDriverHome = () => {
           </div>
         ) : (
           <>
-            <SeatDeck
-              title="Lower Deck"
-              rows={layout?.blueprint?.lowerDeck || []}
-              selectedSeatIds={selectedSeats.map((seat) => seat.id)}
-              onToggle={handleToggleSeat}
-            />
-            <SeatDeck
-              title="Upper Deck"
-              rows={layout?.blueprint?.upperDeck || []}
-              selectedSeatIds={selectedSeats.map((seat) => seat.id)}
-              onToggle={handleToggleSeat}
-            />
+            {/* The coach drawn the way this bus is set up (horizontal / vertical). */}
+            <div className="rounded-[28px] border border-slate-200 bg-white p-4 shadow-sm">
+              <HorizontalSeatMap
+                blueprint={layout?.blueprint}
+                getSeat={(cell) => ({
+                  status: cell.status === 'booked' ? 'booked' : selectedSeats.some((seat) => seat.id === cell.id) ? 'selected' : 'available',
+                })}
+                onSeatClick={(cell) => cell.status !== 'booked' && handleToggleSeat(cell)}
+              />
+            </div>
           </>
         )}
       </div>
@@ -1492,18 +1454,16 @@ const BusDriverHome = () => {
                   </div>
 
                   <div className="mt-4 space-y-4">
-                    <SeatDeck
-                      title="Lower Deck"
-                      rows={layout?.blueprint?.lowerDeck || []}
-                      selectedSeatIds={selectedSeats.map((seat) => seat.id)}
-                      onToggle={handleToggleSeat}
-                    />
-                    <SeatDeck
-                      title="Upper Deck"
-                      rows={layout?.blueprint?.upperDeck || []}
-                      selectedSeatIds={selectedSeats.map((seat) => seat.id)}
-                      onToggle={handleToggleSeat}
-                    />
+                    {/* The coach drawn the way this bus is set up (horizontal / vertical). */}
+                    <div className="rounded-[28px] border border-slate-200 bg-white p-4 shadow-sm">
+                      <HorizontalSeatMap
+                        blueprint={layout?.blueprint}
+                        getSeat={(cell) => ({
+                          status: cell.status === 'booked' ? 'booked' : selectedSeats.some((seat) => seat.id === cell.id) ? 'selected' : 'available',
+                        })}
+                        onSeatClick={(cell) => cell.status !== 'booked' && handleToggleSeat(cell)}
+                      />
+                    </div>
                   </div>
 
                   {selectedSeats.length ? (

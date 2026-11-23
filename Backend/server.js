@@ -6,6 +6,13 @@ import { connectRedis, getRedisStatus } from './src/infrastructure/redis/redisCl
 import { configureTaxiSocketServer } from './src/modules/taxi/socket/index.js';
 import { User } from './src/modules/taxi/user/models/User.js';
 import { restoreScheduledDispatches, startDispatchRecoveryLoop } from './src/modules/taxi/services/dispatchService.js';
+import { startDriverSubscriptionExpiryLoop } from './src/modules/taxi/driver/services/driverSubscriptionExpiryService.js';
+import { startSurgeEngineLoop } from './src/modules/taxi/services/surgeService.js';
+import { startBusHoldSweeper } from './src/modules/taxi/bus/services/busSeatSyncService.js';
+import { startBusPaymentReconciler } from './src/modules/taxi/bus/services/busPaymentService.js';
+import { startDhabaAlertLoop } from './src/modules/taxi/bus/services/dhabaService.js';
+import { startChannelWebhookRetryLoop } from './src/modules/taxi/bus/services/busChannelService.js';
+import { startChannelPullLoop } from './src/modules/taxi/bus/services/busChannelSyncService.js';
 
 const bootstrap = async () => {
   await connectDatabase();
@@ -21,13 +28,26 @@ const bootstrap = async () => {
   const app = createApp();
   const httpServer = createServer(app);
 
-  configureTaxiSocketServer(httpServer);
+  await configureTaxiSocketServer(httpServer);
   await restoreScheduledDispatches();
   startDispatchRecoveryLoop();
+  startDriverSubscriptionExpiryLoop();
+  startSurgeEngineLoop();
+  startBusHoldSweeper();
+  startBusPaymentReconciler();
+  startDhabaAlertLoop();
+  startChannelWebhookRetryLoop();
+  startChannelPullLoop();
 
-  httpServer.listen(env.port, () => {
+  // Loopback by default: nginx is the only thing that should reach these
+  // processes, and with several instances on 5000-5003 a public bind would let
+  // a client pin one instance and skip the load balancer entirely. Set HOST to
+  // override where the proxy lives elsewhere (containers, another box).
+  const host = process.env.HOST || '127.0.0.1';
+
+  httpServer.listen(env.port, host, () => {
     const redisStatus = getRedisStatus();
-    console.log(`Taxi backend listening on port ${env.port}`);
+    console.log(`Taxi backend listening on ${host}:${env.port}`);
     console.log('[redis] status', redisStatus);
   });
 };

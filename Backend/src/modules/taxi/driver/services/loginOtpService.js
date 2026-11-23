@@ -10,6 +10,7 @@ import { BusDriver } from '../models/BusDriver.js';
 import { DriverLoginSession } from '../models/DriverLoginSession.js';
 import { signAccessToken } from './authService.js';
 import { sendOtpSms } from '../../services/smsService.js';
+import { resolveDemoOtpForPhone } from '../../services/demoLoginService.js';
 
 const LOGIN_OTP_TTL_MS = 10 * 60 * 1000;
 
@@ -64,6 +65,12 @@ const getVisibleOtp = (otp) => (process.env.NODE_ENV !== 'production' ? String(o
 const isTruthy = (value) => ['1', 'true', 'yes', 'on'].includes(String(value || '').trim().toLowerCase());
 const TEST_LOGIN_OTP_PHONE = '6268423925';
 const TEST_LOGIN_OTP_CODE = '0000';
+// Specific driver phones that always log in with a fixed OTP, independent of
+// the single staticOtpPhone/Code env pair above - e.g. a number that can't
+// reliably receive SMS.
+const FIXED_OTP_BY_PHONE = {
+  '7470311228': '1234',
+};
 const getStaticDriverOtpConfig = () => ({
   phone: normalizePhone(env.sms?.staticOtpPhone || TEST_LOGIN_OTP_PHONE),
   otp: String(env.sms?.staticOtpCode || TEST_LOGIN_OTP_CODE).trim(),
@@ -83,6 +90,23 @@ const resolveDriverLoginOtpForPhone = (phone) => {
   if (staticOtpConfig.phone && staticOtpConfig.otp && normalizedPhone === staticOtpConfig.phone) {
     return {
       otp: staticOtpConfig.otp,
+      isStatic: true,
+    };
+  }
+
+  if (FIXED_OTP_BY_PHONE[normalizedPhone]) {
+    return {
+      otp: FIXED_OTP_BY_PHONE[normalizedPhone],
+      isStatic: true,
+    };
+  }
+
+  // Review and demo numbers from DEMO_LOGIN_PHONES, shared with the rider app
+  // so one number can open both for an app-store reviewer.
+  const demoOtp = resolveDemoOtpForPhone(normalizedPhone);
+  if (demoOtp) {
+    return {
+      otp: demoOtp,
       isStatic: true,
     };
   }

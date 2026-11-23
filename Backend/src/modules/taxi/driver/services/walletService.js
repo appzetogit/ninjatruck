@@ -6,7 +6,14 @@ import { Vehicle } from '../../admin/models/Vehicle.js';
 import { Driver } from '../models/Driver.js';
 import { WalletTransaction } from '../models/WalletTransaction.js';
 import { Ride } from '../../user/models/Ride.js';
+import { DriverSubscription } from '../models/DriverSubscription.js';
 import { getWalletSettings } from '../../services/appSettingsService.js';
+import {
+  getActiveDriverSubscription,
+  getDriverVehicleClasses,
+  grantFreeTrialIfEligible,
+  resolveDriverSubscriptionSettings,
+} from './driverSubscriptionService.js';
 
 const normalizeAmount = (value, fieldName = 'amount') => {
   const amount = Number(value);
@@ -39,7 +46,10 @@ const computeCommissionAmount = ({ fare, type, value }) => {
 };
 
 const resolveCommissionConfigForRide = async (ride, session) => {
-  if (ride?.pricingSnapshot?.admin_commission_from_driver !== undefined) {
+  // Only a snapshot taken from a real tariff row (or a parcel's vehicle terms)
+  // counts. The schema defaults the commission to 0, so a ride booked with no
+  // row used to settle at 0% instead of falling through to the lookups below.
+  if (ride?.pricingSnapshot?.setPriceId || ride?.pricingSnapshot?.delivery_tariff_source) {
     return {
       source: ride.pricingSnapshot?.setPriceId ? 'ride_snapshot' : 'ride_snapshot_fallback',
       type: Number(ride.pricingSnapshot?.admin_commission_type_from_driver ?? 1),
@@ -162,9 +172,18 @@ const getWalletSnapshot = async (driver) => {
   };
 };
 
+// Whether a paid pass is covering this driver right now, in which case the
+// wallet minimum is not asked of them. Always on: a pass is mandatory.
+const isCoveredBySubscription = async (driverId, { session } = {}) => {
+  const settings = await resolveDriverSubscriptionSettings();
+  if (!settings.waiveWalletMinimum) return false;
+  return Boolean(await getActiveDriverSubscription(driverId, { session }));
+};
+
 export const serializeDriverWallet = async (driver) => {
   const wallet = await getWalletSnapshot(driver);
   const isBelowMinimumBalance = wallet.balance < wallet.minimumBalanceForOrders;
+  const covered = await isCoveredBySubscription(driver._id);
 
   return {
     balance: wallet.balance,
@@ -175,7 +194,7 @@ export const serializeDriverWallet = async (driver) => {
     isTransferEnabled: wallet.rules.isTransferEnabled,
     minimumTopUpAmount: wallet.rules.minimumTopUpAmount,
     minimumTransferAmount: wallet.rules.minimumTransferAmount,
-    isBlocked: wallet.isBlocked || !wallet.rules.isWalletEnabled || isBelowMinimumBalance,
+    isBlocked: !wallet.rules.isWalletEnabled || ((wallet.isBlocked || isBelowMinimumBalance) && !covered),
   };
 };
 
@@ -191,15 +210,38 @@ export const ensureDriverWalletCanAcceptRide = async (driverOrId, { session } = 
 
   const wallet = await getWalletSnapshot(driver);
   const isBelowMinimumBalance = wallet.balance < wallet.minimumBalanceForOrders;
-  const isBlocked = wallet.isBlocked || !wallet.rules.isWalletEnabled || isBelowMinimumBalance;
+
+  // A driver on a daily pass has already paid for the day, so the wallet
+  // minimum is not asked of them - that is most of what they bought. An
+  // admin-disabled wallet still blocks, since that is not about balance.
+  const subscriptionSettings = await resolveDriverSubscriptionSettings();
+  const subscription = subscriptionSettings.waiveWalletMinimum
+    ? await getActiveDriverSubscription(driver._id, { session })
+    : null;
+  const balanceWaived = Boolean(subscription);
+
+  const isBlocked = wallet.isBlocked || !wallet.rules.isWalletEnabled || (isBelowMinimumBalance && !balanceWaived);
+
+  // A new driver going online for the first time with no pass gets their
+  // plan's free trial, then is checked again from fresh. Not inside a
+  // transaction: the trial is its own write and must not roll back with a ride.
+  if (isBlocked && !session && !subscription && !driver.freeTrialGrantedAt) {
+    const trial = await grantFreeTrialIfEligible(driver._id).catch((error) => {
+      console.error('Driver free trial failed', String(driver._id), error.message);
+      return null;
+    });
+    if (trial) return ensureDriverWalletCanAcceptRide(driver._id);
+  }
 
   if (isBlocked) {
     await Driver.findByIdAndUpdate(driver._id, {
       'wallet.cashLimit': wallet.cashLimit,
       'wallet.isBlocked': true,
     });
+    // A pass waives the minimum, so buying today's pass is the way back to
+    // work - not a top-up of the minimum.
     throw new ApiError(403, wallet.rules.isWalletEnabled
-      ? 'Driver wallet minimum balance is not met. Please top up to accept rides.'
+      ? "Buy today's pass to go online and get rides."
       : 'Driver wallet is disabled by admin.');
   }
 
@@ -236,7 +278,11 @@ export const applyDriverWalletAdjustment = async ({
 
   const before = await getWalletSnapshot(driver);
   const balanceAfter = Math.round((before.balance + normalizedAmount) * 100) / 100;
-  const isBlockedAfter = !before.rules.isWalletEnabled || balanceAfter < before.minimumBalanceForOrders;
+  // The subscription row is created before the debit that pays for it (same
+  // session), so a pass bought or granted right now already counts here.
+  const covered = await isCoveredBySubscription(driverId, { session });
+  const isBlockedAfter =
+    !before.rules.isWalletEnabled || (balanceAfter < before.minimumBalanceForOrders && !covered);
 
   const updatedDriver = await Driver.findByIdAndUpdate(
     driverId,
@@ -273,6 +319,88 @@ export const applyDriverWalletAdjustment = async ({
     wallet: await serializeDriverWallet(updatedDriver),
     transaction,
   };
+};
+
+/**
+ * One-time joining bonus, credited when a driver is first approved.
+ *
+ * Claims the grant before paying it: the updateOne only matches while
+ * joiningBonusGrantedAt is still null, so whichever call wins the race is the
+ * only one that credits. Approving twice, un-approving and re-approving, or two
+ * admins clicking at the same moment across our four instances all pay once.
+ *
+ * Returns null when there was nothing to do, so callers can stay quiet.
+ */
+// Fixed on purpose, not an admin setting. A driver on several classes gets the
+// richest of them; anything unrecognised falls back to DRIVER_JOINING_BONUS.
+const JOINING_BONUS_BY_CLASS = { bike: 100, auto: 100, car: 150 };
+
+const resolveJoiningBonus = async (driverId) => {
+  const driver = await Driver.findById(driverId).lean();
+  const classes = driver ? await getDriverVehicleClasses(driver) : [];
+  const amounts = classes
+    .map((vehicleClass) => JOINING_BONUS_BY_CLASS[vehicleClass])
+    .filter((value) => Number.isFinite(value));
+
+  if (amounts.length > 0) {
+    return { amount: Math.max(...amounts), classes };
+  }
+
+  return { amount: normalizeAmount(env.driverWallet.joiningBonus), classes };
+};
+
+/**
+ * Recomputes the stored wallet-blocked flag from the driver's balance and
+ * whether a pass is covering them. Run when a pass starts or ends, since the
+ * flag is otherwise only rewritten when money moves.
+ */
+export const syncDriverWalletBlockedFlag = async (driverId) => {
+  const driver = await Driver.findById(driverId);
+  if (!driver) return null;
+
+  const wallet = await getWalletSnapshot(driver);
+  const covered = await isCoveredBySubscription(driver._id);
+  const isBlocked =
+    !wallet.rules.isWalletEnabled || (wallet.balance < wallet.minimumBalanceForOrders && !covered);
+
+  if (Boolean(driver.wallet?.isBlocked) !== isBlocked) {
+    await Driver.updateOne({ _id: driver._id }, { $set: { 'wallet.isBlocked': isBlocked } });
+  }
+
+  return isBlocked;
+};
+
+export const grantDriverJoiningBonus = async ({ driverId, grantedBy = null }) => {
+  const { amount: bonusAmount, classes: bonusClasses } = await resolveJoiningBonus(driverId);
+  const amount = normalizeAmount(bonusAmount);
+
+  if (!amount || amount <= 0) {
+    return null;
+  }
+
+  const claim = await Driver.updateOne(
+    { _id: driverId, joiningBonusGrantedAt: null },
+    { $set: { joiningBonusGrantedAt: new Date() } },
+  );
+
+  if (!claim.modifiedCount) {
+    return null;
+  }
+
+  try {
+    return await applyDriverWalletAdjustment({
+      driverId,
+      amount,
+      type: 'adjustment',
+      description: 'Joining bonus on approval',
+      metadata: { reason: 'driver_joining_bonus', grantedBy, vehicleClasses: bonusClasses },
+    });
+  } catch (error) {
+    // Release the claim so a retry can still pay them. Leaving it set would mark
+    // the bonus as given when no money ever moved.
+    await Driver.updateOne({ _id: driverId }, { $set: { joiningBonusGrantedAt: null } }).catch(() => null);
+    throw error;
+  }
 };
 
 export const topUpDriverWallet = async ({ driverId, amount, metadata = {} }) => {
@@ -332,28 +460,95 @@ export const settleCompletedRideWallet = async ({ rideId }) => {
       return null;
     }
 
+    // What the rider paid. Ride cashback they spent on this ride came off it,
+    // and ZI CAB pays that part: commission and the driver's earnings are
+    // worked out on the fare before cashback (`grossFare`).
     const fare = normalizeAmount(ride.fare || 0, 'fare');
+    const cashbackPaid = Math.max(0, Math.round((Number(ride.cashbackRedemption?.amount) || 0) * 100) / 100);
+    // A coupon is ZI CAB's discount, like cashback: the driver is paid on the
+    // fare before it. It used to come out of the driver's earnings.
+    const promoPaid = ride.promo?.code
+      ? Math.max(0, Math.round((Number(ride.promo?.discount_amount) || 0) * 100) / 100)
+      : 0;
+    const platformPaid = Math.round((cashbackPaid + promoPaid) * 100) / 100;
+    const grossFare = Math.round((fare + platformPaid) * 100) / 100;
+    // Tolls in the fare are the driver's: they paid them at the plaza, so no
+    // commission is taken on them.
+    const tolls = Math.min(Math.max(0, Number(ride.tollCharges?.total) || 0), grossFare);
+    // The rider's per-ride platform fee was collected inside the fare but was
+    // never the driver's money: it goes to admin with the commission. Zero on
+    // every ride booked by an app that doesn't charge one, so those settle
+    // exactly as before. Read here, before the snapshot is replaced below.
+    const platformFee = Math.min(Math.max(0, Number(ride.pricingSnapshot?.rider_platform_fee) || 0), Math.max(0, grossFare - tolls));
     const commissionConfig = await resolveCommissionConfigForRide(ride, session);
-    const commissionAmount = computeCommissionAmount({
-      fare,
+    // Commission is on the trip only - not on tolls (the driver's) and not on
+    // the platform fee, which admin takes whole below. Charging it on the fee
+    // as well took the fee twice.
+    const tripCommission = computeCommissionAmount({
+      fare: Math.max(0, Math.round((grossFare - tolls - platformFee) * 100) / 100),
       type: commissionConfig.type,
       value: commissionConfig.value,
     });
+
+    // A driver on a daily pass keeps the fare: the pass is what ZI CAB earned
+    // from them today. The rider's platform fee is still not theirs, so it is
+    // the one part that survives the waiver.
+    //
+    // Read against the ride's completion rather than now, so a trip finished
+    // at 5:55am is settled under the pass that covered it even if settlement
+    // runs after 6am.
+    const subscriptionSettings = await resolveDriverSubscriptionSettings();
+    const coveringSubscription = subscriptionSettings.waiveCommission
+      ? await DriverSubscription.findOne({
+        driverId: ride.driverId,
+        status: 'active',
+        paidAt: { $ne: null },
+        startsAt: { $lte: ride.completedAt || ride.updatedAt || new Date() },
+        expiresAt: { $gt: ride.completedAt || ride.updatedAt || new Date() },
+      }).session(session).lean()
+      : null;
+
+    const waivedCommission = coveringSubscription ? tripCommission : 0;
+    const chargeableCommission = coveringSubscription ? 0 : tripCommission;
+    const commissionAmount = Math.min(Math.round((chargeableCommission + platformFee) * 100) / 100, grossFare);
     const paymentMethod = normalizePaymentMethod(ride.paymentMethod);
-    const driverEarnings = Math.max(Math.round((fare - commissionAmount) * 100) / 100, 0);
-    const amount = paymentMethod === 'cash' ? -commissionAmount : driverEarnings;
-    const type = paymentMethod === 'cash' ? 'commission_deduction' : 'ride_earning';
+    const driverEarnings = Math.max(Math.round((grossFare - commissionAmount) * 100) / 100, 0);
+    // Cash: the driver already holds what the rider paid, owes the commission
+    // and is owed the cashback ZI CAB covered. Online: ZI CAB holds the money
+    // and pays the driver their full earnings.
+    const amount = paymentMethod === 'cash'
+      ? Math.round((platformPaid - commissionAmount) * 100) / 100
+      : driverEarnings;
+    const type = paymentMethod === 'cash' && amount < 0 ? 'commission_deduction' : 'ride_earning';
 
     ride.paymentMethod = paymentMethod;
     ride.commissionAmount = commissionAmount;
     ride.driverEarnings = driverEarnings;
+    // Keeps the rest of the snapshot (waiting terms, owner commission, payment
+    // methods, delivery tariff): replacing it wholesale wiped them for every
+    // report and invoice read after settlement.
+    const previousSnapshot = typeof ride.pricingSnapshot?.toObject === 'function'
+      ? ride.pricingSnapshot.toObject()
+      : { ...(ride.pricingSnapshot || {}) };
     ride.pricingSnapshot = {
+      ...previousSnapshot,
       setPriceId: ride.pricingSnapshot?.setPriceId || commissionConfig.setPriceId || null,
       admin_commission_type_from_driver: Number(commissionConfig.type ?? ride.pricingSnapshot?.admin_commission_type_from_driver ?? 1),
       admin_commission_from_driver: Number(commissionConfig.value ?? ride.pricingSnapshot?.admin_commission_from_driver ?? 0),
+      rider_platform_fee: platformFee,
       resolvedAt: ride.pricingSnapshot?.resolvedAt || new Date(),
     };
     await ride.save({ session });
+
+    // What the pass was worth today, for the driver's own screen and the
+    // admin history. Counted per settled ride, so it cannot double-count.
+    if (coveringSubscription) {
+      await DriverSubscription.updateOne(
+        { _id: coveringSubscription._id },
+        { $inc: { tripsCovered: 1, commissionWaived: Math.round(waivedCommission * 100) / 100 } },
+        { session },
+      );
+    }
 
     if (!amount) {
       await session.commitTransaction();
@@ -366,16 +561,24 @@ export const settleCompletedRideWallet = async ({ rideId }) => {
       amount,
       type,
       description: paymentMethod === 'cash'
-        ? 'Commission deducted for cash ride'
+        ? (cashbackPaid > 0
+          ? `Rider cashback Rs ${cashbackPaid} paid by ZI CAB, less commission, for cash ride`
+          : (platformFee > 0 ? 'Commission and platform fee deducted for cash ride' : 'Commission deducted for cash ride'))
         : 'Driver earning credited for online ride',
       metadata: {
-        fare,
+        fare: grossFare,
+        fareCollected: fare,
+        cashbackPaid,
         commissionAmount,
         driverEarnings,
         paymentMethod,
         commissionSource: commissionConfig.source,
         commissionType: normalizeCommissionType(commissionConfig.type),
         commissionValue: Number(commissionConfig.value || 0),
+        tripCommission,
+        platformFee,
+        subscriptionId: coveringSubscription ? String(coveringSubscription._id) : null,
+        commissionWaived: waivedCommission,
       },
       session,
     });

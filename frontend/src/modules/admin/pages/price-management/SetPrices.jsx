@@ -100,6 +100,7 @@ const buildSetPriceGroupingSignature = (item = {}) => JSON.stringify({
   outstation_base_price: Number(item.outstation_base_price ?? 0),
   outstation_base_distance: Number(item.outstation_base_distance ?? 0),
   outstation_price_per_distance: Number(item.outstation_price_per_distance ?? 0),
+  outstation_round_trip_price_per_distance: Number(item.outstation_round_trip_price_per_distance ?? 0),
   outstation_time_price: Number(item.outstation_time_price ?? 0),
 });
 
@@ -159,6 +160,7 @@ const NON_NEGATIVE_FORM_FIELDS = new Set([
   'outstation_base_price',
   'outstation_base_distance',
   'outstation_price_per_distance',
+  'outstation_round_trip_price_per_distance',
   'outstation_time_price',
   'price_per_seat',
   'shared_price_per_distance',
@@ -230,6 +232,7 @@ const initialFormState = {
   outstation_base_price: '',
   outstation_base_distance: '',
   outstation_price_per_distance: '',
+  outstation_round_trip_price_per_distance: '',
   outstation_time_price: '',
   enable_ride_sharing: false,
   enable_shared_ride: 0,
@@ -358,6 +361,12 @@ const SetPrices = ({ mode }) => {
         return;
       }
 
+      // Start the detail fetch alongside zones/vehicle-types rather than after
+      // them; awaiting it separately made edit mode a two-trip waterfall.
+      const detailPromise = mode === 'edit' && editingId
+        ? adminService.getSetPriceById(editingId)
+        : null;
+
       const requests = [
         fetch(`${baseUrl}/zones`, { headers: auth }),
         fetch(`${baseUrl}/types/vehicle-types`, { headers: auth }),
@@ -373,8 +382,8 @@ const SetPrices = ({ mode }) => {
       const vItems = vehiclesData.results || vehiclesData.data?.vehicle_types || JSON.parse(JSON.stringify(vehiclesData.data?.results || []));
       setVehicleTypes(Array.isArray(vItems) ? vItems : []);
 
-      if (mode === 'edit' && editingId) {
-        const detailResponse = await adminService.getSetPriceById(editingId);
+      if (detailPromise) {
+        const detailResponse = await detailPromise;
         const pData = detailResponse?.data?.data || detailResponse?.data || {};
 
         setFormData({
@@ -427,7 +436,8 @@ const SetPrices = ({ mode }) => {
       ...(formData.enable_outstation_ride ? [
         { name: 'Outstation Base Price', val: formData.outstation_base_price },
         { name: 'Outstation Base Distance', val: formData.outstation_base_distance },
-        { name: 'Outstation Price Per Distance', val: formData.outstation_price_per_distance },
+        { name: 'Outstation One-way Price Per Km', val: formData.outstation_price_per_distance },
+        { name: 'Outstation Round-trip Price Per Km', val: formData.outstation_round_trip_price_per_distance },
         { name: 'Outstation Time Price', val: formData.outstation_time_price }
       ] : [])
     ];
@@ -523,7 +533,7 @@ const SetPrices = ({ mode }) => {
           >
             {/* Header */}
             <div className="flex items-center justify-between border-b border-gray-100 pb-2 mb-3">
-               <h1 className="text-2xl font-bold text-[#1E293B]" style={{ fontFamily: '"Times New Roman", Times, serif' }}>Set Prices</h1>
+               <h1 className="text-2xl font-bold text-[#1E293B]">Set Prices</h1>
                <div className="flex items-center gap-1.5 text-[11px] text-slate-400 font-medium tracking-tight">
                   <span className="hover:text-slate-600 transition-colors cursor-pointer" onClick={() => fetchInitialData()}>Set Prices</span>
                   <ChevronRight size={10} className="text-slate-300" />
@@ -795,7 +805,7 @@ const SetPrices = ({ mode }) => {
           >
             {/* Form Header */}
             <div className="flex items-center justify-between border-b border-gray-100 pb-1 mb-2">
-               <h1 className="text-xl font-bold text-[#1E293B]" style={{ fontFamily: '"Times New Roman", Times, serif' }}>{mode === 'edit' ? 'Edit Set Price' : 'Create Set Price'}</h1>
+               <h1 className="text-xl font-bold text-[#1E293B]">{mode === 'edit' ? 'Edit Set Price' : 'Create Set Price'}</h1>
                <div className="flex items-center gap-1.5 text-[11px] text-slate-400 font-medium">
                   <span className="hover:text-slate-600 transition-colors cursor-pointer" onClick={() => navigate('/admin/pricing/set-price')}>Set Prices</span>
                   <ChevronRight size={10} className="text-slate-300" />
@@ -804,13 +814,6 @@ const SetPrices = ({ mode }) => {
             </div>
 
             <div className="bg-white rounded-md border border-gray-100 shadow-sm p-2 relative">
-               {loading && mode === 'edit' && (
-                  <div className="absolute inset-0 bg-white/80 z-20 flex flex-col items-center justify-center gap-4">
-                     <Loader2 className="animate-spin text-indigo-600" size={40} />
-                     <p className="text-xs font-black text-slate-400 uppercase tracking-widest">Hydrating Form State...</p>
-                  </div>
-               )}
-               
                <div className="flex justify-end mb-2">
                   <button type="button" onClick={() => setShowHowItWorks(true)} className="text-[10px] font-bold text-[#00BFA5] underline decoration-dotted underline-offset-4">How It Works</button>
                </div>
@@ -975,7 +978,9 @@ const SetPrices = ({ mode }) => {
                         <div className="col-span-1 sm:col-span-2 md:col-span-4 lg:col-span-6 flex gap-2">
                            <div className="flex-1"><label className={labelClass}>Out. Base</label><input type="number" className={inputClass + " py-1"} value={formData.outstation_base_price} onChange={e => setFormData(p=>({...p, outstation_base_price: e.target.value}))} /></div>
                            <div className="flex-1"><label className={labelClass}>Out. Dist</label><input type="number" className={inputClass + " py-1"} value={formData.outstation_base_distance} onChange={e => setFormData(p=>({...p, outstation_base_distance: e.target.value}))} /></div>
-                           <div className="flex-1"><label className={labelClass}>Out. Price/Dist</label><input type="number" className={inputClass + " py-1"} value={formData.outstation_price_per_distance} onChange={e => setFormData(p=>({...p, outstation_price_per_distance: e.target.value}))} /></div>
+                           <div className="flex-1"><label className={labelClass}>One-way ₹/km</label><input type="number" className={inputClass + " py-1"} value={formData.outstation_price_per_distance} onChange={e => setFormData(p=>({...p, outstation_price_per_distance: e.target.value}))} /></div>
+                           <div className="flex-1"><label className={labelClass}>Round-trip ₹/km</label><input type="number" className={inputClass + " py-1"} placeholder="Same as one-way" title="Charged per km on the distance both ways. Leave 0 to use the one-way rate." value={formData.outstation_round_trip_price_per_distance} onChange={e => setFormData(p=>({...p, outstation_round_trip_price_per_distance: e.target.value}))} /></div>
+                           <div className="flex-1"><label className={labelClass}>Out. ₹/min</label><input type="number" className={inputClass + " py-1"} value={formData.outstation_time_price} onChange={e => setFormData(p=>({...p, outstation_time_price: e.target.value}))} /></div>
                         </div>
                      )}
                   </div>

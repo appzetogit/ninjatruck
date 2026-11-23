@@ -27,6 +27,11 @@ const busSeatCellSchema = new mongoose.Schema(
       enum: ['available', 'blocked'],
       default: 'available',
     },
+    // Pink on the seat map: only a woman can book it in the rider app or website.
+    ladiesOnly: {
+      type: Boolean,
+      default: false,
+    },
   },
   { _id: false },
 );
@@ -62,6 +67,11 @@ const busStopSchema = new mongoose.Schema(
       type: String,
       default: '',
       trim: true,
+    },
+    // Geocoded point, used to auto-compute distance and stop timings.
+    coords: {
+      type: new mongoose.Schema({ lat: Number, lng: Number }, { _id: false }),
+      default: null,
     },
   },
   { _id: false },
@@ -209,6 +219,12 @@ const busScheduleSchema = new mongoose.Schema(
       type: [String],
       default: [],
     },
+    // Which route this slot runs: 'main', 'return' or an extraRoutes[].id.
+    routeKey: {
+      type: String,
+      default: 'main',
+      trim: true,
+    },
     status: {
       type: String,
       enum: ['active', 'paused', 'draft'],
@@ -325,6 +341,14 @@ const busServiceSchema = new mongoose.Schema(
       default: null,
       index: true,
     },
+    // The bus company (see bus/models/BusOperator). operatorName stays as the
+    // display name shown to passengers.
+    operatorId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'TaxiBusOperator',
+      default: null,
+      index: true,
+    },
     ownerDriverId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Driver',
@@ -434,6 +458,20 @@ const busServiceSchema = new mongoose.Schema(
         default: 'seater_2_2',
         trim: true,
       },
+      // How the seat map is drawn for this bus: 'horizontal' = coach on its
+      // side, front at the left (AbhiBus / redBus style); 'vertical' = upright,
+      // front at the top. Operators lay their coaches out either way.
+      seatLayoutOrientation: {
+        type: String,
+        enum: ['horizontal', 'vertical'],
+        default: 'horizontal',
+      },
+      // How the seat numbers were set. No mode: the numbers the layout generated.
+      seatNumbering: {
+        mode: { type: String, enum: ['', 'auto', 'manual', 'excel'], default: '' },
+        pattern: { type: String, default: '', trim: true },
+        start: { type: Number, default: 1 },
+      },
       layoutConfig: {
         lower: {
           type: busDeckLayoutConfigSchema,
@@ -491,10 +529,35 @@ const busServiceSchema = new mongoose.Schema(
         type: [busStopSchema],
         default: [],
       },
+      autoTimings: {
+        type: Boolean,
+        default: true,
+      },
     },
     returnRouteEnabled: {
       type: Boolean,
       default: false,
+    },
+    // Additional routes the same bus runs; schedules pick one via routeKey.
+    extraRoutes: {
+      type: [
+        new mongoose.Schema(
+          {
+            id: { type: String, required: true, trim: true },
+            routeName: { type: String, default: '', trim: true },
+            originCity: { type: String, default: '', trim: true },
+            destinationCity: { type: String, default: '', trim: true },
+            originCoords: { type: busRoutePointSchema, default: null },
+            destinationCoords: { type: busRoutePointSchema, default: null },
+            distanceKm: { type: String, default: '', trim: true },
+            durationHours: { type: String, default: '', trim: true },
+            stops: { type: [busStopSchema], default: [] },
+            autoTimings: { type: Boolean, default: true },
+          },
+          { _id: false },
+        ),
+      ],
+      default: [],
     },
     returnRoute: {
       routeName: {
@@ -533,6 +596,10 @@ const busServiceSchema = new mongoose.Schema(
       stops: {
         type: [busStopSchema],
         default: [],
+      },
+      autoTimings: {
+        type: Boolean,
+        default: true,
       },
     },
     schedules: {

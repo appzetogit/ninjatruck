@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import { ApiError } from '../../../../utils/ApiError.js';
 import { env } from '../../../../config/env.js';
 import { normalizePoint, toPoint } from '../../../../utils/geo.js';
-import { uploadDataUrlToCloudinary } from '../../../../utils/cloudinaryUpload.js';
+import { uploadDataUrl } from '../../../../utils/fileUpload.js';
 import { Driver } from '../models/Driver.js';
 import { DriverRegistrationSession } from '../models/DriverRegistrationSession.js';
 import { Owner } from '../../admin/models/Owner.js';
@@ -43,10 +43,16 @@ const OTP_TTL_MS = 10 * 60 * 1000;
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const DRIVER_NAME_REGEX = /^[A-Za-z]+(?:[ .'-][A-Za-z]+)*$/;
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+// Indian registration formats:
+//   MH12AB1234 / DL1ABCD1234 - state + RTO + letter series + 4 digits
+//   KA651635                 - older plates with no letter series
+//   22BH1234AA               - Bharat (BH) series
 const VEHICLE_NUMBER_PATTERNS = [
   /^[A-Z]{2}\d{1,2}[A-Z]{1,5}\d{4}$/,
+  /^[A-Z]{2}\d{1,2}\d{4}$/,
+  /^\d{2}BH\d{4}[A-Z]{1,2}$/,
 ];
-const ALLOWED_SERVICE_CATEGORIES = ['taxi', 'outstation', 'delivery', 'pooling'];
+const ALLOWED_SERVICE_CATEGORIES = ['taxi', 'outstation', 'delivery', 'pooling', 'airport'];
 
 const VEHICLE_TYPE_MAP = {
   v1: 'bike',
@@ -125,6 +131,8 @@ const getPrimaryRegisterFor = (serviceCategories = [], fallback = 'taxi') => {
   if (normalized.includes('outstation')) return 'outstation';
   if (normalized.includes('delivery')) return 'delivery';
   if (normalized.includes('pooling')) return 'pooling';
+  // Airport trips are taxi rides from the dispatcher's point of view.
+  if (normalized.includes('airport')) return 'taxi';
 
   return String(fallback || 'taxi').trim().toLowerCase() || 'taxi';
 };
@@ -627,7 +635,7 @@ const uploadRegistrationDocument = async (documentKey, value) => {
     .replace(/\.[^.]+$/, '')
     .replace(/[^a-zA-Z0-9-_]/g, '');
 
-  const uploaded = await uploadDataUrlToCloudinary({
+  const uploaded = await uploadDataUrl({
     dataUrl,
     folder: `${documentKey}/driver-documents`,
     publicIdPrefix: `driver-${documentKey}`,
@@ -664,7 +672,7 @@ const uploadRegistrationDocument = async (documentKey, value) => {
     account_holder_name: accountHolderName,
     beneficiaryName: accountHolderName,
     benificiary_name: accountHolderName,
-    cloudinary: uploaded,
+    upload: uploaded,
   };
 };
 
@@ -1073,6 +1081,7 @@ export const saveDriverVehicle = async ({
   locationName,
   serviceLocation,
   vehicleTypeId,
+  vehicleTypeIds,
   rcNumber,
   make,
   model,
@@ -1096,6 +1105,17 @@ export const saveDriverVehicle = async ({
   const selectedLocation = getServiceLocationName(selectedServiceLocation) || String(locationName || city || '').trim();
   const normalizedServiceCategories = normalizeServiceCategories(serviceCategories, registerFor || session.role || 'taxi');
   const normalizedRegisterFor = getPrimaryRegisterFor(normalizedServiceCategories, registerFor || session.role || 'taxi');
+  // Drivers can enroll in more than one vehicle category now (e.g. both
+  // ZI Cab AC and ZI Cab Non-AC). Older app builds still send a single
+  // `vehicleTypeId`, so that's folded in too — de-duplicated, in case it
+  // duplicates one already in the list.
+  const normalizedVehicleTypeIds = [
+    ...new Set(
+      [...(Array.isArray(vehicleTypeIds) ? vehicleTypeIds : []), vehicleTypeId]
+        .map((value) => String(value || '').trim())
+        .filter(Boolean),
+    ),
+  ];
 
   if (!selectedLocation) {
     throw new ApiError(400, 'A valid service location is required');
@@ -1147,10 +1167,9 @@ export const saveDriverVehicle = async ({
     const currentYear = new Date().getFullYear();
 
     requireField('serviceCategories', normalizedServiceCategories, 'Service category');
-    requireField('vehicleTypeId', vehicleTypeId, 'Vehicle type');
-    if (!normalizedRcNumber) {
-      throw new ApiError(400, 'RC number is required');
-    }
+    requireField('vehicleTypeId', normalizedVehicleTypeIds, 'Vehicle type');
+    // RC number was removed from driver onboarding; it is no longer collected
+    // or required. Any value still sent is stored, but its absence is fine.
     requireField('make', make, 'Brand / Make');
     requireField('model', model, 'Model');
     requireField('year', normalizedYear, 'Year');
@@ -1162,7 +1181,7 @@ export const saveDriverVehicle = async ({
     }
 
     if (normalizedNumber && !VEHICLE_NUMBER_PATTERNS.some((pattern) => pattern.test(normalizedNumber))) {
-      throw new ApiError(400, 'Vehicle number must be in a valid format, for example DL1AB2345, DL1ABCD1234, or MH12AB1234');
+      throw new ApiError(400, 'Vehicle number must be in a valid format, for example MH12AB1234, DL1ABCD1234, KA651635, or 22BH1234AA');
     }
   }
 
@@ -1215,7 +1234,8 @@ export const saveDriverVehicle = async ({
           coordinates: getServiceLocationCoordinates(selectedServiceLocation),
         }
       : null,
-    vehicleTypeId: String(vehicleTypeId || '').trim(),
+    vehicleTypeId: normalizedVehicleTypeIds[0] || '',
+    vehicleTypeIds: normalizedVehicleTypeIds,
     rcNumber: normalizedRcNumber,
     make: String(make || '').trim(),
     model: String(model || '').trim(),
@@ -1595,10 +1615,19 @@ export const completeDriverOnboarding = async ({ registrationId, phone, document
   }
 
   const zone = serviceLocationCoordinates ? await findZoneByPickup(serviceLocationCoordinates) : null;
-  const selectedVehicle =
-    session.vehicle.vehicleTypeId && /^[a-f\d]{24}$/i.test(String(session.vehicle.vehicleTypeId))
-      ? await Vehicle.findById(session.vehicle.vehicleTypeId).lean()
-      : null;
+  const requestedVehicleTypeIds = Array.isArray(session.vehicle.vehicleTypeIds) && session.vehicle.vehicleTypeIds.length
+    ? session.vehicle.vehicleTypeIds
+    : [session.vehicle.vehicleTypeId].filter(Boolean);
+  const validVehicleTypeIds = requestedVehicleTypeIds.filter((id) => /^[a-f\d]{24}$/i.test(String(id)));
+  const selectedVehicles = validVehicleTypeIds.length
+    ? await Vehicle.find({ _id: { $in: validVehicleTypeIds } }).lean()
+    : [];
+  // Preserve the driver's chosen order (Vehicle.find doesn't), so the first
+  // one they picked stays the "primary" vehicleType/vehicleTypeId below.
+  const orderedSelectedVehicles = validVehicleTypeIds
+    .map((id) => selectedVehicles.find((vehicle) => String(vehicle._id) === String(id)))
+    .filter(Boolean);
+  const selectedVehicle = orderedSelectedVehicles[0] || null;
   const vehicleType = selectedVehicle
     ? getGenericVehicleTypeFromCatalog(selectedVehicle)
     : getVehicleType(session.vehicle.vehicleTypeId, session.vehicle.registerFor);
@@ -1705,6 +1734,7 @@ export const completeDriverOnboarding = async ({ registrationId, phone, document
         : null,
     vehicleType,
     vehicleTypeId: selectedVehicle?._id || null,
+    vehicleTypeIds: orderedSelectedVehicles.map((vehicle) => vehicle._id),
     vehicleIconType: selectedVehicle?.icon_types || vehicleType,
     registerFor: session.vehicle.registerFor,
     serviceCategories: Array.isArray(session.vehicle.serviceCategories) ? session.vehicle.serviceCategories : [],
@@ -1737,6 +1767,7 @@ export const completeDriverOnboarding = async ({ registrationId, phone, document
         locationId: session.vehicle.locationId,
         locationName: session.vehicle.locationName,
         vehicleTypeId: session.vehicle.vehicleTypeId,
+        vehicleTypeIds: session.vehicle.vehicleTypeIds || [],
         rcNumber: session.vehicle.rcNumber,
         make: session.vehicle.make,
         model: session.vehicle.model,
@@ -1806,7 +1837,7 @@ export const verifyDriverVehicleRc = async ({
   }
 
   if (!VEHICLE_NUMBER_PATTERNS.some((pattern) => pattern.test(normalizedRcNumber))) {
-    throw new ApiError(400, 'RC number must be in a valid format, for example DL1AB2345 or MH12AB1234');
+    throw new ApiError(400, 'RC number must be in a valid format, for example MH12AB1234, KA651635, or 22BH1234AA');
   }
 
   const providerResponse = await verifyRcWithRecharge({

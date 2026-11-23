@@ -72,6 +72,11 @@ export const createDefaultBusinessSettings = () => ({
     maximum_time_for_find_drivers_for_regular_ride: '300',
     trip_accept_reject_duration_for_driver: '15',
     driver_search_radius: '5',
+    // How far out the rider's map draws the online-driver markers, in km.
+    // Separate from driver_search_radius, which is how far dispatch will
+    // actually reach for a driver: a marker eight km away is not "who is
+    // around me", and the client asked for one km.
+    nearby_driver_marker_radius: '1',
     bidding_ride_maximum_distance: '50',
     user_can_make_a_ride_after_x_miniutes: '15',
     minimum_time_for_search_drivers_for_schedule_ride: '1',
@@ -85,14 +90,74 @@ export const createDefaultBusinessSettings = () => ({
     max_dist_secondary_ride: '2',
     enable_my_route_booking_feature: '0',
     how_many_times_a_driver_can_enable_the_my_route_booking_per_day: '1',
+    // The most rides a driver may cancel per day, week or month.
+    enable_driver_cancellation_limit: '1',
+    driver_max_cancellations: '3',
+    driver_cancellation_limit_period: 'week',
+    // Riders see how many women are on a bus once the count reaches the minimum.
+    show_bus_female_travellers: '1',
+    bus_female_travellers_min: '3',
+    // The seat directly beside a woman can only be booked by another woman.
+    enable_bus_ladies_neighbour_rule: '1',
   },
   bid_ride: {
+    // The master switch, and which services may be bid on at all. Both are
+    // read by biddingPolicyService; an absent bidding_services means every
+    // service, so an install that predates these keys keeps its behaviour.
+    bidding_enabled: '1',
+    bidding_services: 'city,outstation,parcel',
+    // Offer bidding on every vehicle, rather than only the ones an admin has
+    // individually marked biddable on the vehicle type. On by default because
+    // that is what the client asked for; switch it off and each vehicle's own
+    // dispatch type decides again.
+    bidding_all_vehicles: '1',
+    // Show the "nobody is accepting at this fare - add more" card while a
+    // rider waits, even when they did not switch bidding on at booking. They
+    // start at exactly the fare they were quoted and only move if they choose
+    // to. Outstation is excluded: handing pricing to the drivers is a
+    // different thing to opt into.
+    user_increment_always: '1',
     bidding_low_percentage: '10',
     bidding_high_percentage: '20',
     bidding_amount_increase_or_decrease: '10',
     user_bidding_low_percentage: '10',
     user_bidding_high_percentage: '20',
     user_bidding_amount_increase_or_decrease: '10',
-    user_fare_increase_wait_minutes: '2',
+    user_fare_increase_wait_minutes: '0',
+  },
+
+  // A daily pass a driver buys instead of paying commission per trip.
+  //
+  // Every rule here is a switch rather than a decision baked into the code,
+  // because how a city is run changes: the same build has to support taking
+  // only commission, only the pass, or both at once.
+  //
+  // Off by default, so nothing changes until an admin turns it on.
+  driver_subscription: {
+    // off - commission only, as before
+    // subscription_only - a pass is required to receive rides
+    // both - a driver may work on commission or buy a pass
+    subscription_mode: 'off',
+    // Waive the per-trip commission while a pass is active. The rider's
+    // platform fee is not waived: that was never the driver's money.
+    waive_commission: '1',
+    // Waive the wallet minimum balance while a pass is active - the whole
+    // point of a daily pass is not having to keep the wallet topped up.
+    waive_wallet_minimum: '1',
+    // A driver registered for several vehicle types: 'highest' charges the
+    // dearest plan that covers any of them and lets them take every kind of
+    // trip; 'driver_choice' lets them buy the cheaper pass and only receive
+    // the vehicle types that pass covers.
+    multi_vehicle_rule: 'highest',
+    // How a driver may pay: wallet balance, the payment gateway, or both.
+    payment_methods: 'wallet,gateway',
+    // At the end of a cycle with no renewal: 'commission' puts the driver
+    // back on the commission model, 'block' stops sending them rides.
+    on_expiry: 'commission',
+    // The cycle is a fixed clock window, not 24 hours from payment: buy at
+    // noon and it still ends at 6am. Hour is local to the timezone below;
+    // the servers run on UTC, so this is read explicitly rather than assumed.
+    cycle_start_hour: '6',
+    cycle_timezone: 'Asia/Kolkata',
   },
 });

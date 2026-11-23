@@ -34,8 +34,16 @@ const BannerImage = () => {
   const [formData, setFormData] = useState(createInitialFormData);
   const [imagePreview, setImagePreview] = useState(null);
 
+  // The transparent decorations shown at the very top of the app home screen,
+  // stored as an array in user_home_settings.topBanners. Admins can add several
+  // and delete any of them.
+  const [topBanners, setTopBanners] = useState([]);
+  const [topDraft, setTopDraft] = useState('');
+  const [topSaving, setTopSaving] = useState(false);
+
   const token = localStorage.getItem('adminToken') || '';
   const baseUrl = globalThis.__LEGACY_BACKEND_ORIGIN__ + '/api/v1/admin';
+  const homeSettingsUrl = `${globalThis.__LEGACY_BACKEND_ORIGIN__}/api/v1/admin/general-settings/user-home-management`;
 
   const resolveImageUrl = useCallback(
     (img) => {
@@ -87,6 +95,108 @@ const BannerImage = () => {
     }
   }, [token]);
 
+  // Reads the stored top banners, tolerating both the new array form and the
+  // old single `topImage` field.
+  const normalizeTopBanners = (settings = {}) => {
+    const raw = settings.topBanners ?? settings.top_banners;
+    if (Array.isArray(raw)) {
+      return raw
+        .map((item, idx) => {
+          const image = typeof item === 'string'
+            ? item
+            : (item?.image || item?.imageUrl || item?.url || '');
+          return image ? { id: item?.id || `tb_${idx}_${Date.now()}`, image: String(image) } : null;
+        })
+        .filter(Boolean);
+    }
+    const single = (settings.topImage || settings.top_image || '').toString();
+    return single ? [{ id: 'tb_legacy', image: single }] : [];
+  };
+
+  const fetchTopBanners = useCallback(async () => {
+    if (!token) return;
+    try {
+      const res = await fetch(homeSettingsUrl, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      setTopBanners(normalizeTopBanners(data.settings || {}));
+    } catch (error) {
+      console.error('Failed to load home top banners:', error);
+    }
+  }, [token, homeSettingsUrl]);
+
+  // Read-modify-write the whole list, so we never clobber the promos the banner
+  // sync writes into the same settings document.
+  const persistTopBanners = useCallback(async (nextList) => {
+    if (!token) return false;
+    setTopSaving(true);
+    try {
+      const res = await fetch(homeSettingsUrl, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = res.ok ? await res.json() : { settings: {} };
+      const currentSettings = data.settings || {};
+
+      const saveRes = await fetch(homeSettingsUrl, {
+        method: 'PATCH',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify({
+          settings: {
+            ...currentSettings,
+            topBanners: nextList,
+            // Keep the legacy single field in sync (first banner) for any app
+            // build that still reads it.
+            topImage: nextList[0]?.image || '',
+          },
+        }),
+      });
+      if (saveRes.ok) {
+        setTopBanners(nextList);
+        return true;
+      }
+      alert('Failed to save top banners');
+      return false;
+    } catch (error) {
+      console.error('Save top banners error:', error);
+      alert(`Network Error: ${error.message}`);
+      return false;
+    } finally {
+      setTopSaving(false);
+    }
+  }, [token, homeSettingsUrl]);
+
+  const handleTopDraftFile = (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => setTopDraft(reader.result.toString());
+    reader.onerror = () => alert('Could not read the image file');
+    reader.readAsDataURL(file);
+    event.target.value = '';
+  };
+
+  const addTopBanner = async () => {
+    const value = topDraft.trim();
+    if (!value) {
+      alert('Choose an image or paste an image URL first');
+      return;
+    }
+    const next = [...topBanners, { id: `tb_${Date.now()}`, image: value }];
+    const ok = await persistTopBanners(next);
+    if (ok) setTopDraft('');
+  };
+
+  const deleteTopBanner = async (id) => {
+    if (!window.confirm('Remove this top banner?')) return;
+    await persistTopBanners(topBanners.filter((b) => b.id !== id));
+  };
+
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
@@ -130,7 +240,8 @@ const BannerImage = () => {
 
   useEffect(() => {
     fetchData();
-  }, [fetchData]);
+    fetchTopBanners();
+  }, [fetchData, fetchTopBanners]);
 
   useEffect(() => {
     if (!isCreateRoute) {
@@ -287,6 +398,119 @@ const BannerImage = () => {
             exit={{ opacity: 0, y: -10 }}
             className="space-y-6"
           >
+            {/* Home Top Banners — transparent decorations pinned to the very
+                top of the app home screen (festival garland, lights, ...).
+                Add as many as you like; the app cross-fades between them. */}
+            <div className="bg-white rounded-[22px] border border-gray-200 shadow-sm p-6">
+              <div className="flex items-center justify-between mb-4">
+                <div>
+                  <h2 className="text-[15px] font-black text-[#2D3A6E] uppercase tracking-tight italic leading-none">
+                    Home Top Banners
+                  </h2>
+                  <p className="text-[11px] font-semibold text-gray-400 mt-1">
+                    Transparent PNGs shown at the very top of the app home page. Add several — the app rotates through them.
+                  </p>
+                </div>
+              </div>
+
+              {/* Add a new top banner */}
+              <div className="flex flex-col gap-4 md:flex-row md:items-start">
+                <div className="w-full md:w-72 shrink-0">
+                  <div className="rounded-xl overflow-hidden border border-gray-200" style={{ background: '#0D1B2A' }}>
+                    {topDraft ? (
+                      <img
+                        src={resolveImageUrl(topDraft)}
+                        alt="New top banner"
+                        className="w-full object-contain"
+                        style={{ maxHeight: 120 }}
+                      />
+                    ) : (
+                      <div className="h-24 flex items-center justify-center text-gray-500 text-xs gap-2">
+                        <ImageIcon size={16} /> Preview
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex-1 space-y-3">
+                  <div className="flex flex-wrap items-center gap-3">
+                    <label className="inline-flex cursor-pointer items-center gap-2 px-4 py-2 text-sm font-semibold text-gray-700 bg-white border border-gray-200 rounded-lg hover:bg-gray-50">
+                      <input type="file" className="hidden" accept="image/png,image/webp,image/*" onChange={handleTopDraftFile} />
+                      <Upload size={16} /> Choose Image
+                    </label>
+                    {topDraft ? (
+                      <button
+                        type="button"
+                        onClick={() => setTopDraft('')}
+                        className="inline-flex items-center gap-2 px-3 py-2 text-sm text-gray-600 bg-white border border-gray-200 rounded-lg hover:bg-gray-50"
+                      >
+                        <Trash2 size={15} /> Clear
+                      </button>
+                    ) : null}
+                  </div>
+
+                  <div>
+                    <label className="block text-[13px] font-semibold text-gray-900 mb-1">Or paste an image URL</label>
+                    <input
+                      type="url"
+                      value={topDraft.startsWith('data:') ? '' : topDraft}
+                      onChange={(e) => setTopDraft(e.target.value)}
+                      placeholder="https://example.com/garland.png"
+                      className="w-full max-w-xl border border-gray-200 rounded-lg px-4 py-2.5 text-sm text-gray-800 bg-white focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none"
+                    />
+                  </div>
+
+                  <div className="pt-1">
+                    <button
+                      type="button"
+                      onClick={addTopBanner}
+                      disabled={topSaving || !topDraft.trim()}
+                      className="h-10 px-6 bg-[#2D3A6E] text-white rounded-lg text-[13px] font-bold hover:bg-[#1d2756] transition-all inline-flex items-center gap-2 disabled:opacity-60"
+                    >
+                      {topSaving ? <Loader2 className="animate-spin" size={16} /> : <Plus size={16} />}
+                      Add Top Banner
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Existing top banners with per-item delete */}
+              <div className="mt-6 border-t border-gray-100 pt-5">
+                <p className="text-[11px] font-bold text-gray-500 uppercase tracking-wider mb-3">
+                  Added top banners ({topBanners.length})
+                </p>
+                {topBanners.length === 0 ? (
+                  <p className="text-sm text-gray-400">No top banners yet. Add one above.</p>
+                ) : (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                    {topBanners.map((b, idx) => (
+                      <div key={b.id} className="rounded-xl border border-gray-200 overflow-hidden">
+                        <div style={{ background: '#0D1B2A' }} className="flex items-center justify-center">
+                          <img
+                            src={resolveImageUrl(b.image)}
+                            alt={`Top banner ${idx + 1}`}
+                            className="w-full object-contain"
+                            style={{ maxHeight: 110 }}
+                          />
+                        </div>
+                        <div className="flex items-center justify-between px-3 py-2 bg-white">
+                          <span className="text-[11px] font-bold text-gray-500">#{idx + 1}</span>
+                          <button
+                            type="button"
+                            onClick={() => deleteTopBanner(b.id)}
+                            disabled={topSaving}
+                            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-[12px] font-bold text-rose-600 bg-white border border-rose-200 rounded-lg hover:bg-rose-50 disabled:opacity-60"
+                          >
+                            <Trash2 size={14} /> Delete
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+
             <div className="bg-white rounded-[22px] border border-gray-200 shadow-sm overflow-hidden">
               <div className="p-6 flex items-center justify-between border-b border-gray-100">
                 <div className="flex items-center gap-3 text-sm text-gray-500">

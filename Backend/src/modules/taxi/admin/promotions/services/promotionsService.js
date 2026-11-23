@@ -1,13 +1,14 @@
 import mongoose from 'mongoose';
 import { ApiError } from '../../../../../utils/ApiError.js';
 import { ServiceLocation } from '../../models/ServiceLocation.js';
+import { Vehicle } from '../../models/Vehicle.js';
 import { ensureAdminState } from '../../services/adminService.js';
 import { User } from '../../../user/models/User.js';
 import { Banner } from '../models/Banner.js';
 import { Notification } from '../models/Notification.js';
 import { PromoCode } from '../models/PromoCode.js';
-import { uploadDataUrlToCloudinary } from '../../../../../utils/cloudinaryUpload.js';
-import { sendPushNotificationToAudience } from '../../../services/pushNotificationService.js';
+import { uploadDataUrl } from '../../../../../utils/fileUpload.js';
+import { countPushAudience, sendPushNotificationToAudience } from '../../../services/pushNotificationService.js';
 
 const nextId = () => new mongoose.Types.ObjectId().toString();
 const PROMO_TRANSPORT_TYPES = ['taxi', 'delivery', 'pooling', 'bus', 'self_drive', 'all'];
@@ -125,6 +126,11 @@ const serializeNotification = (item) => ({
   service_location_id: item.service_location_id || '',
   service_location_name: item.service_location_name || '',
   send_to: item.send_to || 'all',
+  vehicle_type_ids: Array.isArray(item.vehicle_type_ids) ? item.vehicle_type_ids.map(String) : [],
+  vehicle_type_names: Array.isArray(item.vehicle_type_names) ? item.vehicle_type_names : [],
+  voice_enabled: item.voice_enabled === true,
+  voice_text: item.voice_text || '',
+  voice_language: item.voice_language || 'en',
   push_title: item.push_title || '',
   message: item.message || '',
   image: item.image || '',
@@ -319,6 +325,10 @@ const normalizePromoPayload = async (payload, existing = null) => {
   };
 };
 
+// The languages both apps can read a push out loud in.
+const VOICE_LANGUAGES = ['en', 'hi', 'kn', 'ta', 'te'];
+const MAX_VOICE_TEXT_LENGTH = 500;
+
 const normalizeNotificationPayload = async (payload, existing = null) => {
   const serviceLocationId = payload.service_location_id || existing?.service_location_id;
   if (!serviceLocationId) {
@@ -329,6 +339,23 @@ const normalizeNotificationPayload = async (payload, existing = null) => {
   const sendTo = normalizeText(payload.send_to ?? existing?.send_to ?? 'all');
   if (!['all', 'drivers', 'users'].includes(sendTo)) {
     throw new ApiError(400, 'Send to must be all, drivers, or users');
+  }
+
+  const rawVehicleTypeIds = Array.isArray(payload.vehicle_type_ids)
+    ? payload.vehicle_type_ids
+    : payload.vehicle_type_id
+      ? [payload.vehicle_type_id]
+      : [];
+  const vehicleTypeIds = sendTo === 'drivers'
+    ? [...new Set(rawVehicleTypeIds.map((id) => String(id || '').trim()).filter(Boolean))]
+    : [];
+  const vehicles = vehicleTypeIds.length
+    ? await Vehicle.find({ _id: { $in: vehicleTypeIds.map((id) => toObjectIdOrThrow(id, 'vehicle type id')) } })
+      .select('_id name')
+      .lean()
+    : [];
+  if (vehicles.length !== vehicleTypeIds.length) {
+    throw new ApiError(400, 'Selected vehicle type was not found');
   }
 
   const pushTitle = normalizeText(payload.push_title ?? payload.title ?? existing?.push_title);
@@ -342,16 +369,26 @@ const normalizeNotificationPayload = async (payload, existing = null) => {
     throw new ApiError(400, 'Message is required');
   }
 
-  // If image is a data URL (base64), upload it to Cloudinary
+  const voiceEnabled = payload.voice_enabled === true || String(payload.voice_enabled) === 'true';
+  const voiceText = voiceEnabled ? normalizeText(payload.voice_text) || message : '';
+  const voiceLanguage = normalizeText(payload.voice_language) || 'en';
+  if (voiceEnabled && !VOICE_LANGUAGES.includes(voiceLanguage)) {
+    throw new ApiError(400, 'Choose a supported voice language');
+  }
+  if (voiceText.length > MAX_VOICE_TEXT_LENGTH) {
+    throw new ApiError(400, `The voice text can be at most ${MAX_VOICE_TEXT_LENGTH} characters`);
+  }
+
+  // If image is a data URL (base64), store it on this server
   if (image.startsWith('data:')) {
     try {
-      const uploaded = await uploadDataUrlToCloudinary({
+      const uploaded = await uploadDataUrl({
         dataUrl: image,
         publicIdPrefix: 'notification',
       });
       image = uploaded.secureUrl;
     } catch (error) {
-      console.error('Cloudinary upload error:', error);
+      console.error('Image upload error:', error);
       // We don't throw here to allow sending notification even if image upload fails?
       // Actually, it's better to throw so the user knows why it failed.
       throw new ApiError(500, `Failed to upload notification image: ${error.message}`);
@@ -362,6 +399,11 @@ const normalizeNotificationPayload = async (payload, existing = null) => {
     service_location_id: serviceLocation._id,
     service_location_name: serviceLocation.service_location_name || serviceLocation.name || '',
     send_to: sendTo,
+    vehicle_type_ids: vehicles.map((vehicle) => vehicle._id),
+    vehicle_type_names: vehicles.map((vehicle) => vehicle.name || ''),
+    voice_enabled: voiceEnabled,
+    voice_text: voiceText,
+    voice_language: voiceEnabled ? voiceLanguage : 'en',
     push_title: pushTitle,
     message,
     image,
@@ -384,16 +426,16 @@ const normalizeBannerPayload = async (payload, existing = null) => {
     throw new ApiError(400, 'Banner image is required');
   }
 
-  // If image is a data URL (base64), upload it to Cloudinary
+  // If image is a data URL (base64), store it on this server
   if (image.startsWith('data:')) {
     try {
-      const uploaded = await uploadDataUrlToCloudinary({
+      const uploaded = await uploadDataUrl({
         dataUrl: image,
         publicIdPrefix: 'banner',
       });
       image = uploaded.secureUrl;
     } catch (error) {
-      console.error('Cloudinary upload error:', error);
+      console.error('Image upload error:', error);
       throw new ApiError(500, `Failed to upload banner image: ${error.message}`);
     }
   }
@@ -533,6 +575,26 @@ export const listNotifications = async ({ page = 1, limit = 50, send_to, service
   };
 };
 
+/// Who a push would reach, for the count on the send form. Sends nothing.
+export const getNotificationAudience = async ({ service_location_id, send_to, vehicle_type_ids }) => {
+  const sendTo = normalizeText(send_to) || 'all';
+  if (!['all', 'drivers', 'users'].includes(sendTo)) {
+    throw new ApiError(400, 'Send to must be all, drivers, or users');
+  }
+  const vehicleTypeIds = sendTo === 'drivers'
+    ? String(vehicle_type_ids || '')
+      .split(',')
+      .map((id) => id.trim())
+      .filter(Boolean)
+      .map((id) => toObjectIdOrThrow(id, 'vehicle type id'))
+    : [];
+  return countPushAudience({
+    sendTo,
+    serviceLocationId: service_location_id ? toObjectIdOrThrow(service_location_id, 'service location id') : null,
+    vehicleTypeIds,
+  });
+};
+
 export const createNotification = async (payload) => {
   const normalizedPayload = await normalizeNotificationPayload(payload);
   const notification = await Notification.create(normalizedPayload);
@@ -541,9 +603,13 @@ export const createNotification = async (payload) => {
     notificationId: notification._id,
     serviceLocationId: notification.service_location_id,
     sendTo: notification.send_to,
+    vehicleTypeIds: notification.vehicle_type_ids,
     title: notification.push_title,
     body: notification.message,
     image: notification.image,
+    voice: notification.voice_enabled
+      ? { enabled: true, text: notification.voice_text, language: notification.voice_language }
+      : null,
   });
 
   return {

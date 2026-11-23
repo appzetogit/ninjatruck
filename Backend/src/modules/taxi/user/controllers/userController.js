@@ -4,14 +4,16 @@ import { Env, StandardCheckoutClient, StandardCheckoutPayRequest, PrefillUserLog
 import { ApiError } from '../../../../utils/ApiError.js';
 import { asyncHandler } from '../../../../utils/asyncHandler.js';
 import { User } from '../models/User.js';
+import { createWebsiteBookingRequest } from '../services/websiteBookingService.js';
 import { UserWallet } from '../models/UserWallet.js';
+import { consumeCashbackForRide, getLockedCashback, getWithdrawableBalance } from '../../rewards/services/rewardService.js';
 import { AdminBusinessSetting } from '../../admin/models/AdminBusinessSetting.js';
 import { Notification } from '../../admin/promotions/models/Notification.js';
 import { BusService } from '../../admin/models/BusService.js';
 import { Driver } from '../../driver/models/Driver.js';
 import { comparePassword, hashPassword, signAccessToken } from '../services/authService.js';
 import { env } from '../../../../config/env.js';
-import { uploadDataUrlToCloudinary } from '../../../../utils/cloudinaryUpload.js';
+import { uploadDataUrl } from '../../../../utils/fileUpload.js';
 import { resolveConfiguredGatewayCredentials } from '../../services/paymentGatewayService.js';
 import { getTransportRideSettings } from '../../services/transportSettingsService.js';
 import {
@@ -23,6 +25,15 @@ import {
 import { assignPushTokenToEntity } from '../../services/pushTokenService.js';
 import { BusSeatHold } from '../models/BusSeatHold.js';
 import { BusBooking } from '../models/BusBooking.js';
+import { clearExpiredHoldsForSeats, publishBusSeatChange, releaseExpiredBusHolds } from '../../bus/services/busSeatSyncService.js';
+import { busTripBookingProblem, MAX_SEATS_PER_BUS_BOOKING } from '../../bus/utils/busTime.js';
+import {
+  cancelAndRefundFoodForBooking,
+  createPendingDhabaOrders,
+  getFoodStopCounter,
+  priceFoodSelection,
+} from '../../bus/services/dhabaService.js';
+import { finalizeBusBookingPayment, withBusCancellationClaim } from '../../bus/services/busPaymentService.js';
 import { RentalBookingRequest } from '../../admin/models/RentalBookingRequest.js';
 import { RentalQuoteRequest } from '../../admin/models/RentalQuoteRequest.js';
 import { RentalVehicleType } from '../../admin/models/RentalVehicleType.js';
@@ -34,6 +45,12 @@ import { sendPushNotificationToEntities } from '../../services/pushNotificationS
 import { buildRentalTrackingSnapshot, updateUserRentalTracking } from '../../services/rentalTrackingService.js';
 import { listDriverServiceLocations } from '../../driver/services/serviceLocationService.js';
 import { listServiceStores, listSetPrices, listZones } from '../../admin/services/adminService.js';
+import { findZoneByPickup } from '../../services/matchingService.js';
+import { pickTariffPerVehicle } from '../../services/rideFareService.js';
+import { classifyTrip } from '../../services/tripCategoryService.js';
+import { getSurgeAt, getSurgeProfiles, recordSurgeDemand, surgeForVehicle } from '../../services/surgeService.js';
+import { verifyAccessToken } from '../../services/tokenService.js';
+import { resolveRouteCached } from '../../services/routeService.js';
 import {
   findActiveEmployeeByCode,
   normalizeEmployeeCode,
@@ -51,6 +68,9 @@ import {
   summarizePhonePePayload,
   summarizePhonePeRequestBody,
 } from '../../services/paymentDiagnostics.js';
+import { getRequestClientIp } from '../../../../utils/clientIp.js';
+import { listBusRoutes, withScheduleRoute } from '../../bus/utils/busRoutes.js';
+import { getLadiesNeighbourSeatIds, getVisibleFemaleTravellers } from '../../services/busFemaleTravellersService.js';
 
 const VALID_GENDERS = new Set(['male', 'female', 'other', 'prefer-not-to-say', '']);
 
@@ -107,8 +127,11 @@ const ensureUserWallet = async (userId) => {
 const serializeUserWalletTransaction = (entry = {}) => ({
   id: entry._id,
   kind: entry.kind,
+  // The rider app reads these two names; they mirror kind and title.
+  type: entry.kind,
   amount: Number(entry.amount || 0),
   title: entry.title || '',
+  description: entry.title || '',
   counterpartyPhone: entry.counterpartyPhone || '',
   createdAt: entry.createdAt || null,
 });
@@ -116,14 +139,23 @@ const serializeUserWalletTransaction = (entry = {}) => ({
 const buildUserWalletPayload = (wallet) => {
   const transactions = Array.isArray(wallet?.transactions) ? wallet.transactions : [];
 
+  const recentTransactions = transactions
+    .slice()
+    .reverse()
+    .map(serializeUserWalletTransaction);
+  const balance = Number(wallet?.balance || 0);
+
   return {
-    balance: Number(wallet?.balance || 0),
+    balance,
     refundWallet: Number(wallet?.refundWallet || 0),
+    // The part of the balance that is ride cashback (spendable on rides only),
+    // never more than the balance itself. The app showed 0 without it.
+    cashbackBalance: getLockedCashback(wallet),
+    withdrawableBalance: getWithdrawableBalance(wallet),
     currency: 'INR',
-    recentTransactions: transactions
-      .slice()
-      .reverse()
-      .map(serializeUserWalletTransaction),
+    recentTransactions,
+    // Same list under the name the rider app reads; it showed an empty history.
+    transactions: recentTransactions,
   };
 };
 
@@ -576,11 +608,14 @@ const flattenBusBlueprintSeats = (blueprint = {}) =>
     .flatMap((row) => (Array.isArray(row) ? row : []))
     .filter((cell) => cell?.kind === 'seat' && cell?.id);
 
+// A zero or blank per-type price means "not set", so the bus fare applies.
+const positivePrice = (value) => (Number(value) > 0 ? Number(value) : undefined);
+
 const resolveBusSeatPrice = (busService = {}, seat = {}) => {
   const variantPricing = busService?.variantPricing || {};
   const defaultPrice = Number(busService?.seatPrice || 0);
   const variantKey = String(seat?.variant || 'seat').trim().toLowerCase();
-  const resolvedPrice = variantPricing?.[variantKey] ?? variantPricing?.seat ?? defaultPrice;
+  const resolvedPrice = positivePrice(variantPricing?.[variantKey]) ?? positivePrice(variantPricing?.seat) ?? defaultPrice;
 
   return Number.isFinite(Number(resolvedPrice)) ? Number(resolvedPrice) : defaultPrice;
 };
@@ -674,13 +709,13 @@ const normalizeBusCancellationRules = (rules = []) =>
     }))
     .sort((a, b) => b.hoursBeforeDeparture - a.hoursBeforeDeparture);
 
-const computeBusCancellationQuote = ({ booking, busService, now = new Date(), travelDateOverride = '' }) => {
+// The refund window is always measured from the booking's own travel date -
+// never a date sent by the client, which could make a departed bus look days
+// away and earn a full refund.
+const computeBusCancellationQuote = ({ booking, busService, now = new Date() }) => {
   const schedule = findBusSchedule(busService, booking?.scheduleId);
   const departureTime = schedule?.departureTime || booking?.routeSnapshot?.departureTime || '';
-  const resolvedTravelDate = tryNormalizeBusTravelDate(
-    travelDateOverride,
-    booking?.travelDate,
-  );
+  const resolvedTravelDate = tryNormalizeBusTravelDate(booking?.travelDate);
   const departureDateTime = parseBusDateTime(resolvedTravelDate, departureTime);
   const rules = normalizeBusCancellationRules(busService?.cancellationRules);
   const amount = Math.max(0, Number(booking?.amount || 0));
@@ -751,7 +786,6 @@ const buildBusPartialCancellationQuote = ({
   busService,
   seatIds = [],
   now = new Date(),
-  travelDateOverride = '',
 }) => {
   const bookingSnapshot =
     booking && typeof booking.toObject === 'function'
@@ -780,8 +814,16 @@ const buildBusPartialCancellationQuote = ({
     };
   }
 
+  // Each seat's own price when the booking recorded them (a sleeper and a
+  // seater cost differently); the average for older bookings.
+  const seatPriceMap = new Map(
+    (Array.isArray(bookingSnapshot?.seatPrices) ? bookingSnapshot.seatPrices : [])
+      .map((item) => [toCleanString(item?.seatId), Number(item?.amount || 0)]),
+  );
   const perSeatAmount = Math.round((Number(bookingSnapshot?.amount || 0) / seatCount) * 100) / 100;
-  const partialAmount = Math.round(perSeatAmount * selectedCount * 100) / 100;
+  const partialAmount = Math.round(
+    selectedSeatIds.reduce((sum, seatId) => sum + (seatPriceMap.has(seatId) ? seatPriceMap.get(seatId) : perSeatAmount), 0) * 100,
+  ) / 100;
 
   return computeBusCancellationQuote({
     booking: {
@@ -790,7 +832,6 @@ const buildBusPartialCancellationQuote = ({
     },
     busService,
     now,
-    travelDateOverride,
   });
 };
 
@@ -816,33 +857,7 @@ const cleanupExpiredBusSeatHolds = async () => {
   }
 
   busSeatHoldCleanupPromise = (async () => {
-    const now = new Date();
-
-    const expiredBookings = await BusBooking.find({
-      status: 'pending',
-      expiresAt: { $lte: now },
-    })
-      .select('_id')
-      .lean();
-
-    if (expiredBookings.length > 0) {
-      const bookingIds = expiredBookings.map((item) => item._id);
-      await BusBooking.updateMany(
-        { _id: { $in: bookingIds } },
-        { $set: { status: 'expired' } },
-      );
-      await BusSeatHold.deleteMany({
-        bookingId: { $in: bookingIds },
-        status: 'held',
-        expiresAt: { $lte: now },
-      });
-    }
-
-    await BusSeatHold.deleteMany({
-      status: 'held',
-      expiresAt: { $lte: now },
-    });
-
+    await releaseExpiredBusHolds();
     lastBusSeatHoldCleanupAt = Date.now();
   })()
     .finally(() => {
@@ -854,6 +869,11 @@ const cleanupExpiredBusSeatHolds = async () => {
 
 const createBusBookingCode = () =>
   `BUS${Date.now().toString(36).toUpperCase()}${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+
+const femaleTravellersField = (visibleCounts, busServiceId, scheduleId) => {
+  const count = visibleCounts.get(`${String(busServiceId)}:${String(scheduleId)}`);
+  return count ? { femaleTravellers: count } : {};
+};
 
 const serializeBusSearchResult = ({ busService, schedule, availableSeats, travelDate }) => ({
   id: `${String(busService._id)}:${String(schedule.id)}:${travelDate}`,
@@ -994,11 +1014,19 @@ const formatBusStopLabel = (stop = null, fallback = '') => {
   ].filter(Boolean).join(', ') || fallback;
 };
 
-const serializeBusBooking = (booking, busService = null) => {
-  const quote = busService ? computeBusCancellationQuote({ booking, busService }) : null;
-  const schedule = busService ? findBusSchedule(busService, booking?.scheduleId) : null;
+const serializeBusBooking = (booking, rawBusService = null) => {
+  const quote = rawBusService ? computeBusCancellationQuote({ booking, busService: rawBusService }) : null;
+  const schedule = rawBusService ? findBusSchedule(rawBusService, booking?.scheduleId) : null;
+  const busService = withScheduleRoute(rawBusService, schedule);
   const arrivalTime = schedule?.arrivalTime || booking?.routeSnapshot?.arrivalTime || '';
-  const arrivalDateTime = parseBusDateTime(booking?.travelDate, arrivalTime);
+  const departureTime = schedule?.departureTime || booking?.routeSnapshot?.departureTime || '';
+  let arrivalDateTime = parseBusDateTime(booking?.travelDate, arrivalTime);
+  const departureDateTime = parseBusDateTime(booking?.travelDate, departureTime);
+  // Overnight runs (21:00 -> 09:00) arrive the next day, not the morning of
+  // the travel date; otherwise they'd count as completed before departure.
+  if (arrivalDateTime && departureDateTime && arrivalDateTime <= departureDateTime) {
+    arrivalDateTime = new Date(arrivalDateTime.getTime() + 24 * 60 * 60 * 1000);
+  }
   const tripCompleted = Boolean(arrivalDateTime && arrivalDateTime.getTime() < Date.now());
   const persistedCancellation = booking.cancellation || {};
   const cancelledSeats = Array.isArray(booking.cancelledSeats) ? booking.cancelledSeats : [];
@@ -1035,8 +1063,12 @@ const serializeBusBooking = (booking, busService = null) => {
   return {
   id: String(booking._id),
   bookingCode: booking.bookingCode || '',
+  pnr: booking.pnr || '',
   status: booking.status || 'pending',
   bookingSource: booking.bookingSource || 'user',
+  foodAmount: Number(booking.foodAmount || 0),
+  boardingPoint: booking.boardingPoint?.stopId ? booking.boardingPoint : null,
+  droppingPoint: booking.droppingPoint?.stopId ? booking.droppingPoint : null,
   reservedByDriverId: booking.reservedByDriverId ? String(booking.reservedByDriverId) : '',
   travelDate: booking.travelDate || '',
   scheduleId: booking.scheduleId || '',
@@ -1109,16 +1141,20 @@ const serializeBusBooking = (booking, busService = null) => {
     operator: booking.routeSnapshot?.operatorName || '',
     busName: booking.routeSnapshot?.busName || '',
     type: booking.routeSnapshot?.coachType || booking.routeSnapshot?.busCategory || 'Bus',
-    departure: booking.routeSnapshot?.departureTime || '',
-    arrival: booking.routeSnapshot?.arrivalTime || '',
+    departure: booking.routeSnapshot?.departureTime || schedule?.departureTime || '',
+    arrival: booking.routeSnapshot?.arrivalTime || schedule?.arrivalTime || '',
     duration: booking.routeSnapshot?.durationHours || '',
     fromCity: booking.routeSnapshot?.originCity || '',
     toCity: booking.routeSnapshot?.destinationCity || '',
     registrationNumber: booking.routeSnapshot?.registrationNumber || busService?.registrationNumber || '',
     driverName: booking.routeSnapshot?.driverName || busService?.driverName || '',
     driverPhone: booking.routeSnapshot?.driverPhone || busService?.driverPhone || '',
-    pickupLocation: formatBusStopLabel(primaryPickupStop, booking.routeSnapshot?.originCity || ''),
-    dropLocation: formatBusStopLabel(primaryDropStop, booking.routeSnapshot?.destinationCity || ''),
+    pickupLocation: booking.boardingPoint?.stopId
+      ? formatBusStopLabel(booking.boardingPoint, booking.routeSnapshot?.originCity || '')
+      : formatBusStopLabel(primaryPickupStop, booking.routeSnapshot?.originCity || ''),
+    dropLocation: booking.droppingPoint?.stopId
+      ? formatBusStopLabel(booking.droppingPoint, booking.routeSnapshot?.destinationCity || '')
+      : formatBusStopLabel(primaryDropStop, booking.routeSnapshot?.destinationCity || ''),
     routeStops: Array.isArray(busService?.route?.stops) ? busService.route.stops : [],
   },
   createdAt: booking.createdAt || null,
@@ -1945,9 +1981,9 @@ export const uploadUserProfileImage = async (req, res) => {
     throw new ApiError(413, 'Image is too large');
   }
 
-  const uploadResult = await uploadDataUrlToCloudinary({
+  const uploadResult = await uploadDataUrl({
     dataUrl,
-    folder: `${env.cloudinary.folder}/user-profile`,
+    folder: `${env.uploads.folder}/user-profile`,
     publicIdPrefix: 'user-profile',
   });
 
@@ -2088,7 +2124,7 @@ export const getUserWallet = async (req, res) => {
   }
 
   await ensureUserWallet(userId);
-  const wallet = await UserWallet.findOne({ userId }).select('balance refundWallet transactions').slice('transactions', -10).lean();
+  const wallet = await UserWallet.findOne({ userId }).select('balance refundWallet cashbackBalance transactions').slice('transactions', -10).lean();
   const transactions = Array.isArray(wallet?.transactions) ? wallet.transactions : [];
 
   res.json({
@@ -2123,7 +2159,7 @@ export const topupUserWallet = async (req, res) => {
     },
   );
 
-  const updatedWallet = await UserWallet.findOne({ userId }).select('balance transactions').slice('transactions', -10).lean();
+  const updatedWallet = await UserWallet.findOne({ userId }).select('balance refundWallet cashbackBalance transactions').slice('transactions', -10).lean();
   const updatedWalletWithRefund = updatedWallet
     ? { ...updatedWallet, refundWallet: Number(updatedWallet.refundWallet || 0) }
     : updatedWallet;
@@ -2180,12 +2216,16 @@ export const transferUserWallet = async (req, res) => {
   };
 
   const senderUpdate = await UserWallet.updateOne(
-    { userId: senderId, balance: { $gte: amount } },
+    {
+      userId: senderId,
+      // Cashback sits inside the balance but may only pay for rides.
+      $expr: { $gte: [{ $subtract: ['$balance', { $min: [{ $ifNull: ['$cashbackBalance', 0] }, '$balance'] }] }, amount] },
+    },
     { $inc: { balance: -amount }, $push: { transactions: { $each: [debitTx], $slice: -50 } } },
   );
 
   if (!senderUpdate?.modifiedCount) {
-    throw new ApiError(400, 'Insufficient wallet balance');
+    throw new ApiError(400, 'Insufficient wallet balance (cashback can only be used to pay for rides)');
   }
 
   const recipientUpdate = await UserWallet.updateOne(
@@ -2201,7 +2241,7 @@ export const transferUserWallet = async (req, res) => {
     throw new ApiError(500, 'Transfer failed');
   }
 
-  const wallet = await UserWallet.findOne({ userId: senderId }).select('balance refundWallet transactions').slice('transactions', -10).lean();
+  const wallet = await UserWallet.findOne({ userId: senderId }).select('balance refundWallet cashbackBalance transactions').slice('transactions', -10).lean();
 
   const transactions = Array.isArray(wallet?.transactions) ? wallet.transactions : [];
 
@@ -2257,6 +2297,9 @@ export const transferUserWalletToDriver = async (req, res) => {
     if (Number(senderWallet.balance || 0) < amount) {
       throw new ApiError(400, 'Insufficient wallet balance');
     }
+    if (getWithdrawableBalance(senderWallet) < amount) {
+      throw new ApiError(400, 'Cashback balance can only be used to pay for rides');
+    }
 
     senderWallet.balance = Math.round((Number(senderWallet.balance || 0) - amount) * 100) / 100;
     senderWallet.transactions.push({
@@ -2308,7 +2351,7 @@ export const transferUserWalletToDriver = async (req, res) => {
     }).catch(() => {});
 
     const refreshedWallet = await UserWallet.findOne({ userId: senderId })
-      .select('balance refundWallet transactions')
+      .select('balance refundWallet cashbackBalance transactions')
       .slice('transactions', -10)
       .lean();
 
@@ -2449,7 +2492,7 @@ const verifyAndApplyUserRazorpayWalletTopup = async ({
   }
 
   const wallet = await UserWallet.findOne({ userId: effectiveUserId })
-    .select('balance refundWallet transactions')
+    .select('balance refundWallet cashbackBalance transactions')
     .slice('transactions', -10)
     .lean();
 
@@ -2714,6 +2757,7 @@ export const payRentalAdvanceWithWallet = async (req, res) => {
       throw new ApiError(400, 'Insufficient wallet balance');
     }
 
+    consumeCashbackForRide(wallet, amount);
     wallet.balance = Math.round((Number(wallet.balance || 0) - amount) * 100) / 100;
     wallet.transactions.push({
       kind: 'debit',
@@ -2885,7 +2929,7 @@ export const verifyPhonePeWalletTopup = async (req, res) => {
     }
 
     const wallet = await UserWallet.findOne({ userId })
-      .select('balance refundWallet transactions')
+      .select('balance refundWallet cashbackBalance transactions')
       .slice('transactions', -10)
       .lean();
 
@@ -3175,10 +3219,15 @@ export const searchBuses = async (req, res) => {
     throw new ApiError(400, 'fromCity and toCity are required');
   }
 
+  const fromRegex = buildBusCityRegex(fromCity);
+  const toRegex = buildBusCityRegex(toCity);
   const items = await BusService.find({
     status: 'active',
-    'route.originCity': buildBusCityRegex(fromCity),
-    'route.destinationCity': buildBusCityRegex(toCity),
+    $or: [
+      { 'route.originCity': fromRegex, 'route.destinationCity': toRegex },
+      { returnRouteEnabled: true, 'returnRoute.originCity': fromRegex, 'returnRoute.destinationCity': toRegex },
+      { extraRoutes: { $elemMatch: { originCity: fromRegex, destinationCity: toRegex } } },
+    ],
   }).lean();
 
   if (items.length === 0) {
@@ -3206,6 +3255,8 @@ export const searchBuses = async (req, res) => {
     reservedCountMap.set(key, (reservedCountMap.get(key) || 0) + 1);
   });
 
+  const countFoodStops = await getFoodStopCounter(busIds);
+  const femaleTravellers = await getVisibleFemaleTravellers({ busServiceIds: busIds, travelDate });
   const results = items.flatMap((busService) => {
     const schedules = Array.isArray(busService.schedules) ? busService.schedules : [];
     const totalSeats = flattenBusBlueprintSeats(busService.blueprint).filter(
@@ -3214,14 +3265,23 @@ export const searchBuses = async (req, res) => {
 
     return schedules
       .filter((schedule) => isScheduleAvailableOnDate(schedule, travelDate))
-      .map((schedule) => {
+      .map((schedule) => ({ schedule, routedBus: withScheduleRoute(busService, schedule) }))
+      .filter(({ routedBus }) =>
+        fromRegex.test(toCleanString(routedBus.route?.originCity)) &&
+        toRegex.test(toCleanString(routedBus.route?.destinationCity)))
+      .map(({ schedule, routedBus }) => {
         const reservedSeats = reservedCountMap.get(`${String(busService._id)}:${String(schedule.id)}`) || 0;
-        return serializeBusSearchResult({
-          busService,
-          schedule,
-          travelDate,
-          availableSeats: totalSeats - reservedSeats,
-        });
+        return {
+          ...serializeBusSearchResult({
+            busService: routedBus,
+            schedule,
+            travelDate,
+            availableSeats: totalSeats - reservedSeats,
+          }),
+          totalSeats,
+          foodStops: countFoodStops(busService._id, schedule.id),
+          ...femaleTravellersField(femaleTravellers, busService._id, schedule.id),
+        };
       });
   });
 
@@ -3238,14 +3298,14 @@ export const getBusRouteSuggestions = async (_req, res) => {
   await ensureBusServiceEnabled();
 
   const items = await BusService.find({ status: 'active' })
-    .select('route operatorName seatPrice createdAt')
+    .select('route returnRouteEnabled returnRoute extraRoutes operatorName seatPrice createdAt')
     .sort({ createdAt: -1 })
     .lean();
 
-  const seenRoutes = new Set();
+  const seenRoutes = new Map();
   const results = [];
 
-  items.forEach((busService) => {
+  items.flatMap((busService) => listBusRoutes(busService).map((route) => ({ ...busService, route }))).forEach((busService) => {
     const fromCity = toCleanString(busService.route?.originCity);
     const toCity = toCleanString(busService.route?.destinationCity);
 
@@ -3254,12 +3314,16 @@ export const getBusRouteSuggestions = async (_req, res) => {
     }
 
     const key = `${normalizeBusCity(fromCity)}::${normalizeBusCity(toCity)}`;
-    if (seenRoutes.has(key)) {
+    const existing = seenRoutes.get(key);
+    if (existing) {
+      existing.busCount += 1;
+      existing.startingPrice = Math.min(existing.startingPrice || Infinity, Number(busService.seatPrice || 0)) || existing.startingPrice;
       return;
     }
 
-    seenRoutes.add(key);
-    results.push(serializeBusRouteSuggestion(busService));
+    const suggestion = { ...serializeBusRouteSuggestion(busService), busCount: 1 };
+    seenRoutes.set(key, suggestion);
+    results.push(suggestion);
   });
 
   res.status(200).json({
@@ -3292,16 +3356,24 @@ export const getBusSeatLayout = async (req, res) => {
     throw new ApiError(404, 'Bus schedule not found for the selected date');
   }
 
+  // A hold whose payment window ran out frees the seat at once, even before
+  // the sweeper deletes it.
   const holds = await BusSeatHold.find({
     busServiceId,
     scheduleId,
     travelDate,
-    status: { $in: ['held', 'booked'] },
+    $or: [{ status: 'booked' }, { status: 'held', expiresAt: { $gt: new Date() } }],
   })
     .select('seatId')
     .lean();
 
   const reservedSeatIds = new Set(holds.map((item) => String(item.seatId)));
+  const ladiesNeighbourSeatIds = await getLadiesNeighbourSeatIds({
+    busService,
+    scheduleId,
+    travelDate,
+    bookedByUserId: req.auth?.sub,
+  });
   const normalizeDeck = (deckRows = []) =>
     deckRows.map((row) =>
       (Array.isArray(row) ? row : []).map((cell) => {
@@ -3316,12 +3388,16 @@ export const getBusSeatLayout = async (req, res) => {
         return {
           ...cell,
           status: isBlocked || isReserved ? 'booked' : 'available',
+          ladiesOnly: cell.ladiesOnly === true || ladiesNeighbourSeatIds.has(seatId),
         };
       }),
     );
 
   const blueprint = {
     templateKey: busService.blueprint?.templateKey || 'seater_2_2',
+    // How the apps draw this bus's seat map: 'horizontal' or 'vertical'.
+    seatLayoutOrientation:
+      String(busService.blueprint?.seatLayoutOrientation || '').toLowerCase() === 'vertical' ? 'vertical' : 'horizontal',
     lowerDeck: normalizeDeck(busService.blueprint?.lowerDeck || []),
     upperDeck: normalizeDeck(busService.blueprint?.upperDeck || []),
   };
@@ -3329,6 +3405,10 @@ export const getBusSeatLayout = async (req, res) => {
   const availableSeats = flattenBusBlueprintSeats(blueprint).filter(
     (seat) => String(seat.status || 'available') === 'available',
   ).length;
+  const femaleTravellers = await getVisibleFemaleTravellers({
+    busServiceIds: [busService._id],
+    travelDate,
+  });
 
   res.status(200).json({
     success: true,
@@ -3337,8 +3417,9 @@ export const getBusSeatLayout = async (req, res) => {
       scheduleId,
       travelDate,
       availableSeats,
+      ...femaleTravellersField(femaleTravellers, busService._id, scheduleId),
       bus: serializeBusSearchResult({
-        busService,
+        busService: withScheduleRoute(busService, schedule),
         schedule,
         travelDate,
         availableSeats,
@@ -3356,12 +3437,15 @@ export const createBusBookingOrder = async (req, res) => {
   const busServiceId = String(req.body?.busServiceId || '');
   const scheduleId = toCleanString(req.body?.scheduleId);
   const travelDate = normalizeBusTravelDate(req.body?.travelDate || req.body?.date);
+  // One entry per seat; the first is the lead passenger (phone + email).
+  const rawPassengers = Array.isArray(req.body?.passengers) ? req.body.passengers : [];
+  const leadSource = rawPassengers[0] || req.body?.passenger;
   const passenger = {
-    name: toCleanString(req.body?.passenger?.name),
-    age: Number(req.body?.passenger?.age || 0),
-    gender: toCleanString(req.body?.passenger?.gender),
-    phone: normalizePhone(req.body?.passenger?.phone),
-    email: normalizeEmail(req.body?.passenger?.email),
+    name: toCleanString(leadSource?.name),
+    age: Number(leadSource?.age || 0),
+    gender: toCleanString(leadSource?.gender),
+    phone: normalizePhone(leadSource?.phone),
+    email: normalizeEmail(leadSource?.email),
   };
   const seatIds = Array.isArray(req.body?.seatIds)
     ? [...new Set(req.body.seatIds.map((item) => toCleanString(item)).filter(Boolean))]
@@ -3370,6 +3454,9 @@ export const createBusBookingOrder = async (req, res) => {
   if (!busServiceId || !scheduleId || seatIds.length === 0) {
     throw new ApiError(400, 'busServiceId, scheduleId and seatIds are required');
   }
+  if (seatIds.length > MAX_SEATS_PER_BUS_BOOKING) {
+    throw new ApiError(400, `You can book up to ${MAX_SEATS_PER_BUS_BOOKING} seats at a time`);
+  }
 
   validateName(passenger.name);
   validatePhone(passenger.phone);
@@ -3377,6 +3464,25 @@ export const createBusBookingOrder = async (req, res) => {
 
   if (!Number.isFinite(passenger.age) || passenger.age < 1 || passenger.age > 120) {
     throw new ApiError(400, 'Passenger age must be valid');
+  }
+
+  let seatPassengers = [];
+  if (rawPassengers.length > 0) {
+    if (rawPassengers.length !== seatIds.length) {
+      throw new ApiError(400, 'Passenger details are required for every selected seat');
+    }
+    seatPassengers = rawPassengers.map((item) => {
+      const entry = {
+        name: toCleanString(item?.name),
+        age: Number(item?.age || 0),
+        gender: toCleanString(item?.gender),
+      };
+      validateName(entry.name);
+      if (!Number.isFinite(entry.age) || entry.age < 1 || entry.age > 120) {
+        throw new ApiError(400, 'Passenger age must be valid');
+      }
+      return entry;
+    });
   }
 
   const busService = await BusService.findById(busServiceId).lean();
@@ -3394,8 +3500,60 @@ export const createBusBookingOrder = async (req, res) => {
   );
   const seatCellMap = new Map(availableSeatCells.map((seat) => [String(seat.id), seat]));
   const invalidSeat = seatIds.find((seatId) => !seatCellMap.has(seatId));
+  // Each seat's own traveller, or the lead passenger when only one was sent.
+  const ladiesNeighbourSeatIds = await getLadiesNeighbourSeatIds({
+    busService,
+    scheduleId,
+    travelDate,
+    bookedByUserId: userId,
+  });
+  const ladiesSeatIndex = seatIds.findIndex((seatId, index) => (
+    (seatCellMap.get(seatId)?.ladiesOnly === true || ladiesNeighbourSeatIds.has(seatId))
+    && String(seatPassengers[index]?.gender ?? passenger.gender).toLowerCase() !== 'female'
+  ));
+  if (ladiesSeatIndex >= 0) {
+    const seatId = seatIds[ladiesSeatIndex];
+    throw new ApiError(400, `Seat ${seatCellMap.get(seatId)?.label || seatId} is for women only`);
+  }
   if (invalidSeat) {
     throw new ApiError(400, `Seat ${invalidSeat} is not available for booking`);
+  }
+
+  const scheduleRoute = withScheduleRoute(busService, schedule).route || {};
+  const routeStops = Array.isArray(scheduleRoute.stops) ? scheduleRoute.stops : [];
+  const pickBusStop = (stopId, allowedTypes, label, preferArrival) => {
+    const id = toCleanString(stopId);
+    if (!id) {
+      return null;
+    }
+    const stop = routeStops.find((item) => String(item?.id || '') === id);
+    if (!stop || !allowedTypes.includes(String(stop.stopType || 'both'))) {
+      throw new ApiError(400, `Selected ${label} point is not valid for this bus`);
+    }
+    return {
+      stopId: id,
+      city: stop.city || '',
+      pointName: stop.pointName || '',
+      time: preferArrival
+        ? stop.arrivalTime || stop.departureTime || ''
+        : stop.departureTime || stop.arrivalTime || '',
+    };
+  };
+  const boardingPoint = pickBusStop(req.body?.boardingStopId, ['pickup', 'both'], 'boarding', false);
+  const droppingPoint = pickBusStop(req.body?.droppingStopId, ['drop', 'both'], 'dropping', true);
+  if (boardingPoint && droppingPoint && boardingPoint.stopId === droppingPoint.stopId) {
+    throw new ApiError(400, 'Boarding and dropping points must be different');
+  }
+
+  // No past dates or buses that have already left: the rider would pay and
+  // then not be allowed to cancel.
+  const tripProblem = busTripBookingProblem({
+    travelDate,
+    departureTime: schedule.departureTime,
+    boardingTime: boardingPoint?.time || '',
+  });
+  if (tripProblem) {
+    throw new ApiError(400, tripProblem);
   }
 
   const baseAmount = Math.round(
@@ -3408,9 +3566,27 @@ export const createBusBookingOrder = async (req, res) => {
   const serviceTaxPercentage = Math.max(0, Number(busService.serviceTaxPercentage || 0));
   const serviceTaxAmount = Math.round(((baseAmount * serviceTaxPercentage) / 100) * 100) / 100;
   const amount = Math.round((baseAmount + serviceTaxAmount) * 100) / 100;
+  // Each seat's own price with its share of tax, the last seat taking the
+  // rounding, so they add up to `amount` exactly.
+  const seatPrices = seatIds.map((seatId) => ({
+    seatId,
+    amount: Math.round(resolveBusSeatPrice(busService, seatCellMap.get(seatId)) * (1 + serviceTaxPercentage / 100) * 100) / 100,
+  }));
+  if (seatPrices.length) {
+    const others = seatPrices.slice(0, -1).reduce((sum, item) => sum + item.amount, 0);
+    seatPrices[seatPrices.length - 1].amount = Math.round((amount - others) * 100) / 100;
+  }
+
+  // Optional dhaba pre-order, charged in the same payment as the seats.
+  const food = await priceFoodSelection({
+    busServiceId,
+    schedule,
+    travelDate,
+    foodOrders: req.body?.foodOrders,
+  });
 
   const { keyId, keySecret } = await resolveRazorpayCredentials();
-  const amountPaise = Math.round(amount * 100);
+  const amountPaise = Math.round((amount + food.total) * 100);
   const compactUserId = String(userId || '').replace(/[^a-zA-Z0-9]/g, '').slice(-8) || 'usr';
   const receipt = `ubus_${compactUserId}_${Date.now().toString(36)}`;
 
@@ -3442,17 +3618,26 @@ export const createBusBookingOrder = async (req, res) => {
     travelDate,
     seatIds,
     seatLabels: seatIds.map((seatId) => seatCellMap.get(seatId)?.label || seatId),
+    seatPrices,
     passenger,
+    passengers: seatPassengers.map((entry, index) => ({
+      seatId: seatIds[index],
+      seatLabel: seatCellMap.get(seatIds[index])?.label || seatIds[index],
+      ...entry,
+    })),
     amount,
+    foodAmount: food.total,
+    ...(boardingPoint ? { boardingPoint } : {}),
+    ...(droppingPoint ? { droppingPoint } : {}),
     currency: busService.fareCurrency || 'INR',
     status: 'pending',
     expiresAt,
     routeSnapshot: {
-      originCity: busService.route?.originCity || '',
-      destinationCity: busService.route?.destinationCity || '',
+      originCity: scheduleRoute.originCity || '',
+      destinationCity: scheduleRoute.destinationCity || '',
       departureTime: schedule.departureTime || '',
       arrivalTime: schedule.arrivalTime || '',
-      durationHours: busService.route?.durationHours || '',
+      durationHours: scheduleRoute.durationHours || '',
       busName: busService.busName || '',
       operatorName: busService.operatorName || '',
       coachType: busService.coachType || '',
@@ -3472,6 +3657,7 @@ export const createBusBookingOrder = async (req, res) => {
     },
   });
 
+  await clearExpiredHoldsForSeats({ busServiceId, scheduleId, travelDate, seatIds });
   try {
     await BusSeatHold.insertMany(
       seatIds.map((seatId) => ({
@@ -3488,12 +3674,25 @@ export const createBusBookingOrder = async (req, res) => {
       { ordered: true },
     );
   } catch (error) {
+    // ordered:true stops at the first clash, so seats before it were
+    // already locked; free them rather than leave them held for 10 minutes.
+    await BusSeatHold.deleteMany({ bookingId: booking._id, status: 'held' });
     await BusBooking.deleteOne({ _id: booking._id });
     if (error?.code === 11000) {
       throw new ApiError(409, 'One or more selected seats were just booked by someone else');
     }
     throw error;
   }
+
+  await createPendingDhabaOrders({ booking, busService, lines: food.lines });
+  publishBusSeatChange({
+    busServiceId,
+    scheduleId,
+    travelDate,
+    change: 'held',
+    seatIds,
+    bookingId: booking._id,
+  });
 
   res.status(201).json({
     success: true,
@@ -3533,10 +3732,25 @@ export const verifyBusBookingPayment = async (req, res) => {
   const booking = await BusBooking.findOne({
     userId: req.auth?.sub,
     'payment.orderId': orderId,
-  });
+  })
+    .select('_id busServiceId')
+    .lean();
 
   if (!booking) {
     throw new ApiError(404, 'Bus booking not found');
+  }
+
+  // Claim-based: a double tap, a retry and the reconciliation job can't both
+  // confirm and refund the same payment (see busPaymentService).
+  let result = await finalizeBusBookingPayment({ bookingId: booking._id, paymentId, signature });
+  // Another request is finishing this same payment: wait for it briefly.
+  for (let attempt = 0; result.outcome === 'in_progress' && attempt < 12; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const current = await BusBooking.findById(booking._id);
+    if (current?.status === 'confirmed') result = { outcome: 'already_confirmed', booking: current };
+    else if (current && !current.payment?.claimedAt && current.status !== 'pending') {
+      result = { outcome: 'refunded', booking: current, message: 'Seat hold expired before the payment was confirmed.' };
+    }
   }
 
   const busService = booking.busServiceId
@@ -3545,60 +3759,19 @@ export const verifyBusBookingPayment = async (req, res) => {
         .lean()
     : null;
 
-  if (String(booking.status) === 'confirmed') {
-    return res.status(200).json({
+  if (result.outcome === 'confirmed' || result.outcome === 'already_confirmed') {
+    return res.status(result.outcome === 'confirmed' ? 201 : 200).json({
       success: true,
-      data: serializeBusBooking(booking, busService),
+      data: serializeBusBooking(result.booking, busService),
     });
   }
-
-  if (String(booking.status) !== 'pending') {
-    throw new ApiError(409, 'Bus booking is no longer payable');
+  if (result.outcome === 'refunded') {
+    throw new ApiError(409, `${result.message || 'Your seats could not be confirmed.'} Your payment will be refunded.`);
   }
-
-  if (booking.expiresAt && booking.expiresAt <= new Date()) {
-    booking.status = 'expired';
-    booking.payment.status = 'expired';
-    await booking.save();
-    await BusSeatHold.deleteMany({ bookingId: booking._id, status: 'held' });
-    throw new ApiError(409, 'Seat hold expired before payment verification');
+  if (result.outcome === 'in_progress') {
+    throw new ApiError(409, 'Your payment is still being confirmed. Please check My Bookings in a minute.');
   }
-
-  const holds = await BusSeatHold.find({
-    bookingId: booking._id,
-    status: 'held',
-    expiresAt: { $gt: new Date() },
-  }).lean();
-
-  if (holds.length !== booking.seatIds.length) {
-    booking.status = 'failed';
-    booking.payment.status = 'seat_conflict';
-    await booking.save();
-    await BusSeatHold.deleteMany({ bookingId: booking._id, status: 'held' });
-    throw new ApiError(409, 'Some selected seats are no longer reserved for this payment');
-  }
-
-  booking.status = 'confirmed';
-  booking.payment.paymentId = paymentId;
-  booking.payment.signature = signature;
-  booking.payment.status = 'paid';
-  booking.payment.paidAt = new Date();
-  await booking.save();
-
-  await BusSeatHold.updateMany(
-    { bookingId: booking._id, status: 'held' },
-    {
-      $set: {
-        status: 'booked',
-        expiresAt: null,
-      },
-    },
-  );
-
-  res.status(201).json({
-    success: true,
-    data: serializeBusBooking(booking, busService),
-  });
+  throw new ApiError(409, 'Bus booking is no longer payable');
 };
 
 export const getMyBusBookingById = async (req, res) => {
@@ -3665,7 +3838,15 @@ export const submitMyBusBookingReview = async (req, res) => {
 
   const schedule = findBusSchedule(busService, booking.scheduleId);
   const arrivalTime = schedule?.arrivalTime || booking?.routeSnapshot?.arrivalTime || '';
-  const arrivalDateTime = parseBusDateTime(booking.travelDate, arrivalTime);
+  let arrivalDateTime = parseBusDateTime(booking.travelDate, arrivalTime);
+  const departureDateTime = parseBusDateTime(
+    booking.travelDate,
+    schedule?.departureTime || booking?.routeSnapshot?.departureTime || '',
+  );
+  // Overnight runs arrive the day after the travel date.
+  if (arrivalDateTime && departureDateTime && arrivalDateTime <= departureDateTime) {
+    arrivalDateTime = new Date(arrivalDateTime.getTime() + 24 * 60 * 60 * 1000);
+  }
 
   if (!arrivalDateTime || Number.isNaN(arrivalDateTime.getTime())) {
     throw new ApiError(409, 'Bus arrival time is unavailable, so rating is not open yet');
@@ -3708,6 +3889,19 @@ export const submitMyBusBookingReview = async (req, res) => {
 };
 
 export const cancelMyBusBooking = async (req, res) => {
+  const bookingId = String(req.params?.id || '').trim();
+  if (!mongoose.Types.ObjectId.isValid(bookingId)) {
+    throw new ApiError(400, 'Valid bus booking id is required');
+  }
+  try {
+    return await withBusCancellationClaim({ _id: bookingId, userId: req.auth?.sub }, () => cancelClaimedBusBooking(req, res));
+  } catch (error) {
+    if (error?.statusCode === 409 && !(error instanceof ApiError)) throw new ApiError(409, error.message);
+    throw error;
+  }
+};
+
+const cancelClaimedBusBooking = async (req, res) => {
   await ensureBusServiceEnabled();
   await cleanupExpiredBusSeatHolds();
 
@@ -3773,7 +3967,6 @@ export const cancelMyBusBooking = async (req, res) => {
     booking,
     busService,
     seatIds: seatsToCancel.map((item) => item.seatId),
-    travelDateOverride: req.body?.travelDate || req.body?.date,
   });
   if (!cancellationQuote.allowed) {
     throw new ApiError(409, cancellationQuote.reason || 'This booking can no longer be cancelled');
@@ -3848,13 +4041,32 @@ export const cancelMyBusBooking = async (req, res) => {
   booking.payment.status = refundPayload
     ? (remainingActiveSeatCount <= 0 ? 'refunded' : 'partially_refunded')
     : (remainingActiveSeatCount <= 0 ? 'cancelled' : booking.payment.status || 'paid');
-  await booking.save();
+  // The refund has already gone out: recording it must not be lost to one
+  // failed write.
+  try {
+    await booking.save();
+  } catch (saveError) {
+    console.error('[bus] cancel save failed after refund, retrying', booking.bookingCode, refundPayload?.id, saveError.message);
+    await booking.save();
+  }
 
   await BusSeatHold.deleteMany({
     bookingId: booking._id,
     status: { $in: ['held', 'booked'] },
     seatId: { $in: seatsToCancel.map((item) => item.seatId) },
   });
+  publishBusSeatChange({
+    busServiceId: booking.busServiceId,
+    scheduleId: booking.scheduleId,
+    travelDate: booking.travelDate,
+    change: 'released',
+    seatIds: seatsToCancel.map((item) => item.seatId),
+    bookingId: booking._id,
+  });
+
+  if (remainingActiveSeatCount <= 0) {
+    await cancelAndRefundFoodForBooking(booking, { reason: 'Passenger cancelled the trip', by: 'user' });
+  }
 
   res.status(200).json({
     success: true,
@@ -4414,9 +4626,251 @@ export const listMyBusBookings = async (req, res) => {
   });
 };
 
+// pickTariffPerVehicle lives in services/rideFareService.js, shared with the
+// server fare engine so the row a rider is shown is the row they are charged on.
+
+/// Who is asking for a price, for counting distinct riders in surge demand.
+/// The route is public, so the token is read if present but never required.
+const surgeRequester = (req) => {
+  const [, token] = String(req.headers.authorization || '').split(' ');
+  if (token) {
+    try {
+      const payload = verifyAccessToken(token);
+      if (payload?.sub) return `u:${payload.sub}`;
+    } catch {
+      // Expired or foreign token: fall back to the address.
+    }
+  }
+  return `ip:${getRequestClientIp(req)}`;
+};
+
+/// Tariff catalog for the rider apps.
+///
+/// Two things separate this from the admin listing, and both were mispricing
+/// every quote in the app:
+///
+///   - It is never paginated. The admin default of ten rows truncated a
+///     sixteen-row catalog, so six vehicle types arrived with no tariff at all
+///     and the app quoted them at an unrelated vehicle's rate.
+///   - It is scoped to one zone. The app takes the first row matching a
+///     vehicle, so returning every zone's rows let whichever zone was edited
+///     last price the whole country - a Bangalore rider was quoted Indore's
+///     tariff and then charged Bangalore's.
+///
+/// Pass the pickup as `lat`/`lng` (or a `zone_id` outright) to get the tariffs
+/// that trip will actually be billed at. Callers that send neither still get
+/// the full unscoped list, so older app builds keep working.
+/**
+ * Every set-price row matching a query, across pages.
+ *
+ * listSetPrices returns 10 rows unless asked for more. A zone with more rows
+ * than that - Bangalore has 16, because several vehicles carry an old and a
+ * new row - lost the rest, so some vehicles' city prices were never read and
+ * the generic no-zone row priced them instead.
+ */
+const listAllSetPrices = async (args, options) => {
+  const rows = [];
+  for (let page = 1; page <= 20; page += 1) {
+    const result = await listSetPrices({ ...args, page, limit: 100 }, null, options);
+    const batch = result.results || [];
+    rows.push(...batch);
+    if (batch.length < 100) break;
+  }
+  return rows;
+};
+
+/**
+ * The normal (un-surged) ride tariff per vehicle at a point, picked exactly as
+ * a rider's quote picks it - same zone lookup, same no-zone fallback, same
+ * ranking.
+ *
+ * For the driver surge map's "₹194 for 5 km, normally ₹149". Unlike
+ * getSetPrices it records nothing: a driver looking at the map must never be
+ * counted as a rider asking for a price, or looking would raise the surge.
+ */
+export const getTariffsAt = async ({ lat, lng, transportType = null } = {}) => {
+  const latitude = Number(lat);
+  const longitude = Number(lng);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return { zone: null, tariffs: [] };
+
+  const zone = await findZoneByPickup([longitude, latitude]);
+  const zoneId = zone ? String(zone._id) : null;
+  if (!zoneId) return { zone: null, tariffs: [] };
+
+  const [zoneRows, fallback] = await Promise.all([
+    listAllSetPrices({ scope: 'ride', zone_id: zoneId }, { hikeMultiplier: 1 }),
+    listAllSetPrices({ scope: 'ride', zone_id: 'none' }, { hikeMultiplier: 1 }),
+  ]);
+  const rows = [...zoneRows, ...fallback];
+  const serviceLocationId = zone?.service_location_id
+    ? String(zone.service_location_id._id || zone.service_location_id)
+    : null;
+
+  return { zone, tariffs: pickTariffPerVehicle(rows, zoneId, serviceLocationId, transportType) };
+};
+
 export const getSetPrices = asyncHandler(async (req, res) => {
-  const data = await listSetPrices(req.query || {}, null);
-  res.status(200).json({ success: true, ...data });
+  const query = { ...(req.query || {}) };
+  const latitude = Number(query.lat ?? query.latitude);
+  const longitude = Number(query.lng ?? query.longitude);
+  const transportType = String(query.transport_type || '').trim().toLowerCase() || null;
+
+  // A catalog, not a browsable table: a client that receives only part of it
+  // cannot price the vehicles it is already showing.
+  if (!query.limit && !query.per_page) {
+    query.limit = 100;
+  }
+
+  let zone = null;
+  const requestedZoneId = String(query.zone_id || '').trim();
+
+  if (Number.isFinite(latitude) && Number.isFinite(longitude)) {
+    zone = await findZoneByPickup([longitude, latitude]);
+  }
+
+  delete query.zone_id;
+  // Matched exactly by the listing, which would discard every row marked
+  // 'both'; ranked here instead.
+  delete query.transport_type;
+  delete query.lat;
+  delete query.lng;
+  delete query.latitude;
+  delete query.longitude;
+
+  const zoneId = zone ? String(zone._id) : (requestedZoneId || null);
+
+  // No location sent, so no zone to rank for. Most requests to this endpoint
+  // arrive like this - older app builds and screens that ask before GPS is
+  // ready - and those apps choose the price themselves from the whole table.
+  // They always received the whole table; returning only the no-zone rows
+  // instead left them with a single vehicle, and Bengaluru riders with no
+  // prices. Every page is fetched, so the listing's hundred-row cut-off cannot
+  // silently drop the oldest cities' rows either.
+  if (!zoneId) {
+    const firstPage = await listSetPrices({ ...query, page: 1, limit: 100 }, null);
+    const lastPage = Number(firstPage.paginator?.last_page || 1);
+    let allRows = [...(firstPage.results || [])];
+    for (let page = 2; page <= lastPage; page += 1) {
+      const nextPage = await listSetPrices({ ...query, page, limit: 100 }, null);
+      allRows = allRows.concat(nextPage.results || []);
+    }
+    res.status(200).json({ success: true, ...firstPage, results: allRows });
+    return;
+  }
+
+  // Only the rows the cascade below can use: this zone's, and the no-zone
+  // fallbacks. It used to ask for every row in every zone and let the ranking
+  // discard the rest - but the listing sorts newest first and cuts at a
+  // hundred, so once the table passed a hundred rows, adding zones pushed the
+  // oldest ones off the page. Seeding Karnataka, Bidar and Hyderabad took
+  // Bengaluru from twelve vehicles to three. Fetched this way the count of
+  // zones no longer matters.
+  // Every located quote is a rider wanting a ride here: it is the demand the
+  // automatic surge measures, and the pickup's hexagon sets its multiplier.
+  let surge = { multiplier: 1, ends_at: null, hex: null, profiles: {} };
+  if (Number.isFinite(latitude) && Number.isFinite(longitude)) {
+    recordSurgeDemand({ lat: latitude, lng: longitude, requester: surgeRequester(req) })
+      .catch((error) => console.error('Surge demand not recorded', error.message));
+    surge = await getSurgeAt(latitude, longitude).catch(() => surge);
+  }
+  // Surge is set per vehicle type: each row is priced with its own vehicle's.
+  const surgeProfiles = await getSurgeProfiles();
+  const multiplierForVehicle = (vehicleTypeId) => surgeForVehicle(surge, surgeProfiles, vehicleTypeId).multiplier;
+
+  const [zoneRows, fallback] = await Promise.all([
+    listSetPrices({ ...query, zone_id: zoneId }, null, { multiplierForVehicle }),
+    listSetPrices({ ...query, zone_id: 'none' }, null, { multiplierForVehicle }),
+  ]);
+  const data = { ...zoneRows, results: [...(zoneRows.results || []), ...(fallback.results || [])] };
+
+  const serviceLocationId = zone?.service_location_id
+    ? String(zone.service_location_id._id || zone.service_location_id)
+    : null;
+
+  const results = pickTariffPerVehicle(data.results, zoneId, serviceLocationId, transportType);
+
+  // Each vehicle's surge, for a badge on that vehicle alone. The top-level
+  // multiplier is the highest of them, so an app that shows one badge for the
+  // whole list never hides a surge a rider would pay.
+  const byVehicle = {};
+  for (const row of results) {
+    const id = String(row.type_id || row.vehicle_type?._id || row.vehicle_type || '');
+    if (!id || byVehicle[id]) continue;
+    const vehicleSurge = surgeForVehicle(surge, surgeProfiles, id);
+    if (vehicleSurge.multiplier > 1) byVehicle[id] = vehicleSurge;
+  }
+  const highest = Object.values(byVehicle).reduce(
+    (best, item) => (item.multiplier > best.multiplier ? item : best),
+    { multiplier: 1, ends_at: null },
+  );
+
+  res.status(200).json({
+    success: true,
+    ...data,
+    results,
+    zone_id: zoneId,
+    zone_name: zone?.name || null,
+    price_hike_multiplier: highest.multiplier,
+    // For a "1.10x surge" label and its countdown in the apps. Each row's own
+    // price_hike_multiplier is the one it was priced with.
+    surge: {
+      multiplier: highest.multiplier,
+      source: highest.multiplier > 1 ? 'automatic' : 'none',
+      ends_at: highest.ends_at,
+      by_vehicle: byVehicle,
+    },
+  });
+});
+
+/// Reads a "lat,lng" query value into GeoJSON [lng, lat] order.
+const parseLatLng = (raw) => {
+  const parts = String(raw || '').split(',');
+  if (parts.length !== 2) return null;
+  const latitude = Number(parts[0].trim());
+  const longitude = Number(parts[1].trim());
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
+  if (Math.abs(latitude) > 90 || Math.abs(longitude) > 180) return null;
+  return [longitude, latitude];
+};
+
+/// Road route between two points, for the apps' maps.
+///
+/// Both apps used to call the public OSRM demo server directly. It is
+/// unauthenticated, rate-limited, and its usage policy forbids production
+/// traffic - and when it throttled, the rider app fell back to drawing a
+/// synthetic L-shaped path that follows no road at all. Rider and driver also
+/// fetched independently, so they could draw different routes for one trip.
+///
+/// Serving it here gives one provider, the account's own Directions key, a
+/// shared cache, and the same polyline for everyone. Authenticated because
+/// each miss costs money.
+export const getRoute = asyncHandler(async (req, res) => {
+  const origin = parseLatLng(req.query.origin);
+  const destination = parseLatLng(req.query.destination);
+
+  if (!origin || !destination) {
+    throw new ApiError(400, 'origin and destination are required, each as "lat,lng"');
+  }
+
+  const stops = String(req.query.waypoints || '')
+    .split('|')
+    .filter(Boolean)
+    .map(parseLatLng)
+    .filter(Boolean)
+    .slice(0, 8);
+
+  // Shared with parcel pricing, so a delivery's route line and its fare come
+  // from one lookup. A failed lookup is no longer cached for five minutes.
+  const route = await resolveRouteCached({ origin, destination, stops });
+
+  if (!route?.polyline) {
+    // 503, not 502: both providers being unreachable is a temporary condition
+    // and the caller should keep whatever line it already has rather than
+    // treating this as a permanent failure.
+    throw new ApiError(503, 'No route provider is reachable right now');
+  }
+
+  res.status(200).json({ success: true, data: route });
 });
 
 export const getZones = asyncHandler(async (req, res) => {
@@ -4424,3 +4878,31 @@ export const getZones = asyncHandler(async (req, res) => {
   res.status(200).json({ success: true, results });
 });
 
+/**
+ * Public booking enquiry from the marketing site. Unauthenticated on purpose:
+ * the website form is a lead capture, not a signed-in booking flow.
+ */
+export const submitWebsiteBooking = async (req, res) => {
+  const data = await createWebsiteBookingRequest(req.body);
+
+  res.status(201).json({
+    success: true,
+    data: {
+      message: 'Booking request received. Our team will call you shortly.',
+      ...data,
+    },
+  });
+};
+
+/// What kind of trip a pickup and drop make - city, airport, outstation or
+/// unserviceable - and so which module's vehicles the rider is offered. Takes
+/// `pickup` and `drop` as "lat,lng".
+export const getTripCategory = asyncHandler(async (req, res) => {
+  const pickup = parseLatLng(req.query.pickup);
+  const drop = parseLatLng(req.query.drop);
+  if (!pickup || !drop) {
+    res.status(400).json({ success: false, message: 'pickup and drop are required as "lat,lng"' });
+    return;
+  }
+  res.status(200).json({ success: true, data: await classifyTrip({ pickup, drop }) });
+});

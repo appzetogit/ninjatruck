@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { runRedisCommand } from '../../../infrastructure/redis/redisClient.js';
 import { env } from '../../../config/env.js';
+import { getRequestClientIp } from '../../../utils/clientIp.js';
 
 const fallbackCounters = new Map();
 
@@ -38,19 +39,9 @@ const sha1 = (value) => crypto.createHash('sha1').update(String(value || '')).di
 
 const toCleanString = (value) => String(value || '').trim();
 
-const getClientIp = (req) => {
-  const forwardedFor = req.headers['x-forwarded-for'];
-  if (typeof forwardedFor === 'string' && forwardedFor.trim()) {
-    return forwardedFor.split(',')[0].trim();
-  }
-
-  return (
-    req.ip ||
-    req.socket?.remoteAddress ||
-    req.connection?.remoteAddress ||
-    'unknown'
-  );
-};
+// See utils/clientIp.js: the first X-Forwarded-For entry is whatever the
+// client wrote, so per-IP limits read the address nginx saw instead.
+const getClientIp = (req) => getRequestClientIp(req);
 
 const resolveIdentifierParts = (req, mode = 'ip') => {
   const ip = getClientIp(req);
@@ -243,6 +234,18 @@ export const createRateLimitMiddleware = ({
   };
 };
 
+/// Routing is billed per call by Google, so this is capped tighter than a
+/// plain read would be. A live trip needs very few: the route is cached
+/// server-side and a reroute only fires after ten seconds of sustained
+/// deviation. The limit exists so a leaked token cannot run up a bill.
+export const routeRateLimit = createRateLimitMiddleware({
+  scope: 'route',
+  max: 60,
+  windowMs: 5 * 60 * 1000,
+  modes: ['ip'],
+  message: 'Too many route requests. Please try again shortly.',
+});
+
 export const otpSendRateLimit = createRateLimitMiddleware({
   scope: 'otp_send',
   max: 5,
@@ -289,4 +292,14 @@ export const availableDriversRateLimit = createRateLimitMiddleware({
   windowMs: 60 * 1000,
   mode: 'ip',
   message: 'Too many driver availability requests. Please try again later.',
+});
+
+/// Fare quotes: asked again whenever the rider edits the trip, so generous,
+/// but each one can cost a Directions lookup.
+export const rideQuoteRateLimit = createRateLimitMiddleware({
+  scope: 'ride_quote',
+  max: 60,
+  windowMs: 60 * 1000,
+  mode: 'auth_or_ip',
+  message: 'Too many fare requests. Please try again in a moment.',
 });

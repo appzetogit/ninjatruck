@@ -1,115 +1,114 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import { useNavigate, useLocation } from 'react-router-dom';
-import { motion, AnimatePresence } from 'framer-motion';
-import { ArrowLeft, ChevronRight, Loader2 } from 'lucide-react';
-import userBusService from '../../services/busService';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
+import { AlertTriangle, Radio, X, Users } from 'lucide-react';
+import userBusService, { BUS_SEAT_EVENTS } from '../../services/busService';
+import { socketService } from '../../../../shared/api/socket';
+import { BusScreen, BusTopBar, EmptyState, FooterBar, Skeleton } from '../../components/bus/ZiBusUi';
+import { formatDay, formatRupees, routePrefixFor, toDateKey } from '../../components/bus/zibusFormat';
 import { buildBusRouteState, toPlainData } from './busNavigationState';
 
-const getRoutePrefix = (pathname = '') => (pathname.startsWith('/taxi/user') ? '/taxi/user' : '');
+const MAX_SEATS = 6;
 
-const getDisplayRoute = (bus, fallbackFromCity = '', fallbackToCity = '') => ({
-  fromCity: bus?.route?.originCity || bus?.fromCity || fallbackFromCity,
-  toCity: bus?.route?.destinationCity || bus?.toCity || fallbackToCity,
-});
-
-const seatLegend = [
-  { key: 'available', label: 'Available' },
-  { key: 'selected', label: 'Selected' },
-  { key: 'booked', label: 'Booked' },
-  { key: 'sleeper', label: 'Sleeper' },
-];
+// A zero or blank per-type price means "not set", so the bus fare applies.
+const positivePrice = (value) => (Number(value) > 0 ? Number(value) : undefined);
 
 const resolveSeatPrice = (bus, seat) => {
   const variantPricing = bus?.variantPricing || {};
   const defaultPrice = Number(bus?.price || 0);
   const variantKey = String(seat?.variant || 'seat').trim().toLowerCase();
-  const resolvedPrice = variantPricing?.[variantKey] ?? variantPricing?.seat ?? defaultPrice;
-
-  return Number.isFinite(Number(resolvedPrice)) ? Number(resolvedPrice) : defaultPrice;
+  const resolved = positivePrice(variantPricing?.[variantKey]) ?? positivePrice(variantPricing?.seat) ?? defaultPrice;
+  return Number.isFinite(Number(resolved)) ? Number(resolved) : defaultPrice;
 };
 
-const SeatDeck = ({ title, rows, selectedSeatIds, onToggle }) => {
-  if (!rows?.length) return null;
+const normalizeIsoDate = (value) => {
+  const raw = String(value || '').trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(raw) ? raw : toDateKey(new Date(value));
+};
+
+const SteeringWheel = () => (
+  <svg viewBox="0 0 24 24" className="zb-muted h-7 w-7" fill="none" stroke="currentColor" strokeWidth="2.2" aria-label="Driver">
+    <circle cx="12" cy="12" r="9.5" />
+    <circle cx="12" cy="12" r="2.2" fill="currentColor" />
+    <path d="M12 14.2V21.5M9.9 11.3L3 9.5M14.1 11.3L21 9.5" />
+  </svg>
+);
+
+/**
+ * One deck drawn like a bus, the way this bus is set up to be shown
+ * (blueprint.seatLayoutOrientation): 'horizontal' = on its side, front at the
+ * left, berths flat; 'vertical' = upright, front at the top, berths tall. The
+ * blueprint lists rows from the front, each across the bus; drawn sideways it
+ * is transposed. An all-aisle position is a thin gap.
+ */
+const Deck = ({ title, rows, selectedIds, onToggle, priceOf, showWheel, vertical }) => {
+  const lengthCount = rows?.length || 0;
+  const widthCount = Math.max(0, ...(rows || []).map((row) => (Array.isArray(row) ? row.length : 0)));
+  if (!lengthCount || !widthCount) return null;
+  const isSeat = (cell) => cell?.kind === 'seat';
+  const aisle = Array.from({ length: widthCount }, (_, across) => rows.every((row) => !isSeat(row?.[across])));
+  const gridRows = vertical ? lengthCount : widthCount;
+  const gridCols = vertical ? widthCount : lengthCount;
+  const cellAt = (r, c) => (vertical ? rows[r]?.[c] : rows[c]?.[r]);
+
+  const grid = (
+    <div
+      className="grid gap-2"
+      style={{
+        gridTemplateColumns: Array.from({ length: gridCols }, (_, c) => (vertical && aisle[c] ? '12px' : 'auto')).join(' '),
+        gridTemplateRows: Array.from({ length: gridRows }, (_, r) => (!vertical && aisle[r] ? '12px' : 'auto')).join(' '),
+      }}
+    >
+      {Array.from({ length: gridRows }, (_, r) =>
+        Array.from({ length: gridCols }, (_, c) => {
+          const seat = cellAt(r, c);
+          const key = `${title}-${r}-${c}`;
+          if (!isSeat(seat)) return <div key={key} />;
+          const booked = seat.status === 'booked';
+          const selected = selectedIds.includes(seat.id);
+          const sleeper = seat.variant === 'sleeper';
+          const size = sleeper
+            ? vertical ? { width: 46, minHeight: 76 } : { width: 76, minHeight: 34 }
+            : { width: 42, minHeight: 42 };
+          return (
+            <button
+              key={key}
+              type="button"
+              disabled={booked}
+              onClick={() => onToggle(seat)}
+              className={`zb-seat ${sleeper ? 'is-sleeper' : ''} ${vertical ? '' : 'is-sideways'} ${booked ? 'is-booked' : ''} ${seat.ladiesOnly && !booked ? 'is-ladies' : ''} ${selected ? 'is-selected' : ''}`}
+              style={{ ...size, justifySelf: 'center', alignSelf: 'center' }}
+              aria-label={booked ? `Seat ${seat.label || seat.id}, booked` : `Seat ${seat.label || seat.id}, ${formatRupees(priceOf(seat))}`}
+              title={booked ? `${seat.label || seat.id} · Booked` : `${seat.label || seat.id} · ${formatRupees(priceOf(seat))}`}
+            >
+              <span className="zb-seat-price" style={vertical ? undefined : { paddingRight: 6 }}>
+                {selected ? seat.label || seat.id : formatRupees(priceOf(seat))}
+              </span>
+            </button>
+          );
+        }),
+      )}
+    </div>
+  );
+
+  if (vertical) {
+    return (
+      <div className="zb-deck">
+        <div className="mb-4 flex items-center justify-between">
+          <span className="zb-label">{title}</span>
+          {showWheel ? <SteeringWheel /> : <span className="h-7" />}
+        </div>
+        <div className="overflow-x-auto">{grid}</div>
+      </div>
+    );
+  }
 
   return (
-    <div className="w-full bg-white rounded-[28px] p-5 shadow-[0_8px_30px_rgba(15,23,42,0.06)] border border-slate-100">
-      <div className="flex justify-between items-center mb-5 pb-5 border-b border-dashed border-slate-100">
-        <span className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] px-2 py-1 bg-slate-50 rounded">{title}</span>
-        <div className="w-10 h-10 rounded-full border-4 border-slate-200 border-r-transparent border-b-transparent transform rotate-45 flex items-center justify-center">
-          <div className="w-6 h-6 rounded-full border-2 border-slate-200" />
-        </div>
+    <div className="zb-deck flex items-stretch gap-3">
+      <div className="flex w-8 shrink-0 flex-col items-center justify-between py-1">
+        {showWheel ? <SteeringWheel /> : <span />}
+        <span className="zb-label rotate-180 [writing-mode:vertical-rl]">{title}</span>
       </div>
-
-      <div className="space-y-3">
-        {rows.map((row, rowIndex) => (
-          <div
-            key={`${title}-${rowIndex}`}
-            className="grid gap-3"
-            style={{ gridTemplateColumns: `repeat(${Math.max(1, row.length)}, minmax(0, 1fr))` }}
-          >
-            {row.map((seat, cellIndex) => {
-              if (!seat || seat.kind !== 'seat') {
-                return <div key={`${title}-${rowIndex}-${cellIndex}`} className="w-full" />;
-              }
-
-              const isBooked = seat.status === 'booked';
-              const isSelected = selectedSeatIds.includes(seat.id);
-              const isSleeper = seat.variant === 'sleeper';
-
-              return (
-                <motion.button
-                  key={seat.id}
-                  type="button"
-                  disabled={isBooked}
-                  whileTap={!isBooked ? { scale: 0.85 } : {}}
-                  onClick={() => onToggle(seat)}
-                  className={`relative flex w-full items-center justify-center border-2 transition-all ${
-                    isBooked
-                      ? 'cursor-not-allowed border-slate-300 bg-slate-200'
-                      : isSelected
-                        ? 'border-slate-900 bg-slate-900 shadow-[0_6px_16px_rgba(2,6,23,0.22)]'
-                        : isSleeper
-                          ? 'border-blue-200 bg-blue-50 hover:border-blue-300'
-                          : 'border-slate-300 bg-white hover:border-orange-300'
-                  }`}
-                  style={{
-                    minHeight: isSleeper ? '52px' : '44px',
-                    borderRadius: isSleeper ? '18px' : '10px',
-                  }}
-                  aria-label={isBooked ? `Seat ${seat.label || seat.id} sold out` : `Seat ${seat.label || seat.id}`}
-                  title={isBooked ? `Sold out: ${seat.label || seat.id}` : `Available: ${seat.label || seat.id}`}
-                >
-                  {isSleeper ? (
-                    <>
-                      <div
-                        className={`absolute left-1.5 top-1/2 h-[72%] w-2 -translate-y-1/2 rounded-full transition-colors ${
-                          isBooked ? 'bg-slate-400' : isSelected ? 'bg-orange-300' : 'bg-blue-200'
-                        }`}
-                      />
-                      <div className="flex w-full items-center justify-center px-3 pl-5">
-                        <span
-                          className={`text-[10px] font-black leading-none ${
-                            isSelected ? 'text-white' : isBooked ? 'text-slate-500' : 'text-slate-700'
-                          }`}
-                        >
-                          {seat.label || seat.id}
-                        </span>
-                      </div>
-                    </>
-                  ) : (
-                    <>
-                      <div className={`absolute -top-1 h-2 w-full rounded-t-sm transition-colors ${isBooked ? 'bg-slate-400' : isSelected ? 'bg-orange-400' : 'bg-slate-200'}`} />
-                      <span className={`text-[9px] font-black leading-none ${isSelected ? 'text-white' : isBooked ? 'text-slate-500' : 'text-slate-600'}`}>
-                        {seat.label || seat.id}
-                      </span>
-                    </>
-                  )}
-                </motion.button>
-              );
-            })}
-          </div>
-        ))}
-      </div>
+      <div className="overflow-x-auto">{grid}</div>
     </div>
   );
 };
@@ -117,182 +116,211 @@ const SeatDeck = ({ title, rows, selectedSeatIds, onToggle }) => {
 const BusSeats = () => {
   const navigate = useNavigate();
   const location = useLocation();
-  const routePrefix = useMemo(() => getRoutePrefix(location.pathname), [location.pathname]);
+  const routePrefix = useMemo(() => routePrefixFor(location.pathname), [location.pathname]);
   const state = location.state || {};
   const { bus, fromCity, toCity, date } = state;
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [seatLayout, setSeatLayout] = useState(null);
   const [selectedSeats, setSelectedSeats] = useState([]);
-  const displayRoute = getDisplayRoute(seatLayout?.bus || bus, fromCity, toCity);
+  const [seatNotice, setSeatNotice] = useState('');
+  const selectedSeatsRef = useRef(selectedSeats);
+  useEffect(() => {
+    selectedSeatsRef.current = selectedSeats;
+  }, [selectedSeats]);
+
+  const pricingBus = seatLayout?.bus || bus;
+  const priceOf = (seat) => resolveSeatPrice(pricingBus, seat);
 
   useEffect(() => {
     if (!bus?.busServiceId || !bus?.scheduleId || !date) {
       navigate(`${routePrefix}/bus`, { replace: true });
-      return;
+      return undefined;
     }
-
     let active = true;
-
-    const loadSeats = async () => {
-      setLoading(true);
-      setError('');
-      try {
-        const response = await userBusService.getSeatLayout({
-          busServiceId: bus.busServiceId,
-          scheduleId: bus.scheduleId,
-          date,
-        });
-        if (!active) return;
-        setSeatLayout(toPlainData(response?.data) || null);
-      } catch (err) {
-        if (!active) return;
-        setError(err?.message || 'Failed to load seat layout');
-      } finally {
-        if (active) {
-          setLoading(false);
-        }
-      }
-    };
-
-    loadSeats();
-
+    userBusService
+      .getSeatLayout({ busServiceId: bus.busServiceId, scheduleId: bus.scheduleId, date })
+      .then((response) => active && setSeatLayout(toPlainData(response?.data) || null))
+      .catch((err) => active && setError(err?.message || 'Could not load the seat map'))
+      .finally(() => active && setLoading(false));
     return () => {
       active = false;
     };
   }, [bus?.busServiceId, bus?.scheduleId, date, navigate, routePrefix]);
 
+  // Live seat map: seats sold or released anywhere (this app, the operator's
+  // counter, or another booking platform) flip here without a refresh.
+  useEffect(() => {
+    if (!bus?.busServiceId || !bus?.scheduleId || !date) return undefined;
+
+    const watch = { busServiceId: bus.busServiceId, scheduleId: bus.scheduleId, travelDate: normalizeIsoDate(date) };
+    const socket = socketService.connect({ role: 'user' });
+    const sendWatch = () => socketService.emit(BUS_SEAT_EVENTS.WATCH, watch);
+
+    const handleUpdate = (payload) => {
+      if (
+        String(payload?.busServiceId) !== String(watch.busServiceId) ||
+        String(payload?.scheduleId) !== String(watch.scheduleId) ||
+        String(payload?.travelDate) !== String(watch.travelDate)
+      ) {
+        return;
+      }
+      const unavailable = new Set((payload.unavailableSeatIds || []).map(String));
+      setSeatLayout((current) => {
+        if (!current?.blueprint) return current;
+        const remap = (rows = []) => rows.map((row) => (Array.isArray(row) ? row : []).map((cell) => (
+          cell?.kind === 'seat' ? { ...cell, status: unavailable.has(String(cell.id)) ? 'booked' : 'available' } : cell
+        )));
+        return {
+          ...current,
+          availableSeats: payload.availableSeats,
+          blueprint: { ...current.blueprint, lowerDeck: remap(current.blueprint.lowerDeck), upperDeck: remap(current.blueprint.upperDeck) },
+        };
+      });
+
+      const lost = selectedSeatsRef.current.filter((seat) => unavailable.has(String(seat.id)));
+      if (lost.length) {
+        setSeatNotice(`Seat ${lost.map((seat) => seat.label || seat.id).join(', ')} was just booked by someone else.`);
+        setSelectedSeats((current) => current.filter((seat) => !unavailable.has(String(seat.id))));
+      }
+    };
+
+    socketService.on(BUS_SEAT_EVENTS.SEATS_UPDATED, handleUpdate);
+    socketService.on('connect', sendWatch);
+    if (socket?.connected) sendWatch();
+
+    return () => {
+      socketService.emit(BUS_SEAT_EVENTS.UNWATCH, {});
+      socketService.off(BUS_SEAT_EVENTS.SEATS_UPDATED, handleUpdate);
+      socketService.off('connect', sendWatch);
+    };
+  }, [bus?.busServiceId, bus?.scheduleId, date]);
+
   const toggleSeat = (seat) => {
     if (!seat || seat.status === 'booked') return;
-
-    setSelectedSeats((current) =>
-      current.some((item) => item.id === seat.id)
-        ? current.filter((item) => item.id !== seat.id)
-        : [...current, { id: seat.id, label: seat.label || seat.id, variant: seat.variant || 'seat', price: resolveSeatPrice(seatLayout?.bus || bus, seat) }],
-    );
+    if (selectedSeats.some((item) => item.id === seat.id)) {
+      setSelectedSeats((current) => current.filter((item) => item.id !== seat.id));
+      return;
+    }
+    if (selectedSeats.length >= MAX_SEATS) {
+      setSeatNotice(`You can book up to ${MAX_SEATS} seats at a time.`);
+      return;
+    }
+    setSelectedSeats((current) => [...current, { id: seat.id, label: seat.label || seat.id, variant: seat.variant || 'seat', price: priceOf(seat), ladiesOnly: seat.ladiesOnly === true }]);
   };
 
+  const lowerDeck = seatLayout?.blueprint?.lowerDeck || [];
+  const upperDeck = seatLayout?.blueprint?.upperDeck || [];
+  const hasUpper = upperDeck.some((row) => (row || []).some((cell) => cell?.kind === 'seat'));
+  // Each bus is shown the way the operator set it up.
+  const vertical = seatLayout?.blueprint?.seatLayoutOrientation === 'vertical';
   const totalFare = selectedSeats.reduce((sum, seat) => sum + Number(seat.price || 0), 0);
+  const variantPrices = new Map();
+  [...lowerDeck, ...upperDeck].flat().filter((cell) => cell?.kind === 'seat').forEach((cell) => {
+    variantPrices.set(cell.variant === 'sleeper' ? 'Sleeper' : 'Seater', resolveSeatPrice(pricingBus, cell));
+  });
+  const variants = [...variantPrices.entries()];
 
   return (
-    <div className="min-h-screen bg-slate-50 max-w-lg mx-auto font-sans pb-32">
-      <div className="bg-white px-5 pt-10 pb-4 sticky top-0 z-20 border-b border-slate-100 shadow-sm">
-        <div className="flex items-center gap-3">
-          <button
-            onClick={() => navigate(-1)}
-            className="w-9 h-9 rounded-xl border border-slate-200 bg-white flex items-center justify-center shadow-sm active:scale-95 transition-all"
-          >
-            <ArrowLeft size={18} className="text-slate-900" />
-          </button>
-          <div className="flex-1">
-            <h1 className="text-lg font-bold text-slate-900 truncate">Select Seats</h1>
-            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mt-0.5">
-              {bus?.operator} • {displayRoute.fromCity} to {displayRoute.toCity}
-            </p>
-          </div>
-        </div>
-      </div>
+    <BusScreen>
+      <BusTopBar
+        onBack={() => navigate(-1)}
+        title="Choose your seats"
+        subtitle={`${bus?.operator || ''} · ${fromCity || bus?.fromCity || ''} → ${toCity || bus?.toCity || ''} · ${formatDay(date)}`}
+        step={1}
+      />
 
-      <div className="px-5 pt-6 space-y-6">
+      <div className="zb-body">
+        {seatNotice ? (
+          <div className="zb-card flex items-start gap-3 p-3" style={{ borderColor: 'color-mix(in srgb, var(--zb-food) 55%, transparent)' }}>
+            <AlertTriangle size={18} className="zb-food-text mt-0.5 shrink-0" />
+            <p className="zb-text flex-1 text-sm font-semibold">{seatNotice}</p>
+            <button type="button" onClick={() => setSeatNotice('')} className="zb-muted" aria-label="Dismiss"><X size={16} /></button>
+          </div>
+        ) : null}
+
         {loading ? (
-          <div className="bg-white rounded-3xl border border-slate-100 shadow-sm p-12 flex flex-col items-center gap-4 text-slate-500">
-            <Loader2 size={32} className="animate-spin text-slate-400" />
-            <p className="text-sm font-bold text-slate-400">Loading seat map...</p>
-          </div>
-        ) : null}
-
-        {!loading && error ? (
-          <div className="bg-rose-50 border border-rose-100 rounded-2xl p-4 text-sm font-bold text-rose-600">
-            {error}
-          </div>
-        ) : null}
-
-        {!loading && !error ? (
           <>
-            <SeatDeck
-              title="Lower Deck"
-              rows={seatLayout?.blueprint?.lowerDeck || []}
-              selectedSeatIds={selectedSeats.map((seat) => seat.id)}
-              onToggle={toggleSeat}
-            />
-            <SeatDeck
-              title="Upper Deck"
-              rows={seatLayout?.blueprint?.upperDeck || []}
-              selectedSeatIds={selectedSeats.map((seat) => seat.id)}
-              onToggle={toggleSeat}
-            />
+            <Skeleton height={56} />
+            <Skeleton height={420} />
+          </>
+        ) : error ? (
+          <EmptyState title="Seat map unavailable" text={error} />
+        ) : (
+          <>
+            <div className="zb-card flex items-center justify-between p-3">
+              <span className="zb-badge is-green"><Radio size={11} className="zb-pulse" /> Live seat status</span>
+              <span className="zb-text text-sm font-extrabold">{Number(seatLayout?.availableSeats ?? 0)} seats left</span>
+            </div>
 
-            <div className="grid grid-cols-2 gap-3 rounded-2xl border border-slate-100 bg-white p-4 shadow-sm">
-              {seatLegend.map((item) => (
-                <div key={item.key} className="flex items-center gap-2">
-                  <div
-                    className={`h-4 w-4 ${
-                      item.key === 'sleeper' ? 'rounded-xl border border-blue-200 bg-blue-50' : 'rounded border-2'
-                    } ${
-                      item.key === 'available'
-                        ? 'border-slate-200 bg-white'
-                        : item.key === 'selected'
-                          ? 'border-slate-900 bg-slate-900'
-                          : item.key === 'booked'
-                            ? 'border-slate-200 bg-slate-200'
-                            : ''
-                    }`}
-                  />
-                  <span className="text-[10px] font-bold uppercase text-slate-500">{item.label}</span>
-                </div>
+            {Number(seatLayout?.femaleTravellers || 0) > 0 ? (
+              <div className="zb-card flex items-center gap-2 p-3">
+                <Users size={16} className="zb-food-text shrink-0" />
+                <p className="zb-text text-sm font-bold">
+                  {seatLayout.femaleTravellers} women travelling on this bus
+                  <span className="zb-muted block text-[11px] font-semibold">As entered by travellers when booking</span>
+                </p>
+              </div>
+            ) : null}
+
+            {Number(state.passengers) > 1 ? (
+              <p className="zb-text px-1 text-sm font-bold">
+                {selectedSeats.length} of {state.passengers} seats chosen for your group
+              </p>
+            ) : null}
+
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-2 px-1">
+              <span className="zb-muted flex items-center gap-2 text-[11px] font-bold">
+                <span className="zb-seat !min-h-0 h-4 w-4" /> Available
+              </span>
+              <span className="zb-muted flex items-center gap-2 text-[11px] font-bold">
+                <span className="zb-seat is-selected !min-h-0 h-4 w-4" /> Yours
+              </span>
+              <span className="zb-muted flex items-center gap-2 text-[11px] font-bold">
+                <span className="zb-seat is-booked !min-h-0 h-4 w-4" /> Booked
+              </span>
+              {[...lowerDeck, ...upperDeck].flat().some((cell) => cell?.ladiesOnly) ? (
+                <span className="zb-muted flex items-center gap-2 text-[11px] font-bold">
+                  <span className="zb-seat is-ladies !min-h-0 h-4 w-4" /> Ladies only
+                </span>
+              ) : null}
+              {variants.map(([name, price]) => (
+                <span key={name} className="zb-muted text-[11px] font-bold">{name} {formatRupees(price)}</span>
               ))}
             </div>
+
+            {vertical ? (
+              // Upright: lower and upper next to each other.
+              <div className="flex flex-wrap items-start gap-3">
+                <Deck title="Lower deck" rows={lowerDeck} selectedIds={selectedSeats.map((seat) => seat.id)} onToggle={toggleSeat} priceOf={priceOf} showWheel vertical />
+                {hasUpper ? (
+                  <Deck title="Upper deck" rows={upperDeck} selectedIds={selectedSeats.map((seat) => seat.id)} onToggle={toggleSeat} priceOf={priceOf} vertical />
+                ) : null}
+              </div>
+            ) : (
+              // On its side: upper above lower, scrolling sideways on a phone.
+              <div className="space-y-3">
+                {hasUpper ? (
+                  <Deck title="Upper" rows={upperDeck} selectedIds={selectedSeats.map((seat) => seat.id)} onToggle={toggleSeat} priceOf={priceOf} />
+                ) : null}
+                <Deck title="Lower" rows={lowerDeck} selectedIds={selectedSeats.map((seat) => seat.id)} onToggle={toggleSeat} priceOf={priceOf} showWheel />
+              </div>
+            )}
           </>
-        ) : null}
+        )}
       </div>
 
-      <div className="fixed bottom-0 left-1/2 -translate-x-1/2 w-full max-w-lg px-5 pb-8 pt-4 bg-white border-t border-slate-100 z-30">
-        <AnimatePresence>
-          {selectedSeats.length > 0 && (
-            <motion.div
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: 10 }}
-              className="bg-slate-50 rounded-2xl p-4 flex items-center justify-between mb-4 border border-slate-100"
-            >
-              <div>
-                <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">
-                  {selectedSeats.length} Seat{selectedSeats.length > 1 ? 's' : ''} Selected
-                </p>
-                <p className="text-sm font-bold text-slate-900">
-                  {selectedSeats.map((seat) => seat.label || seat.id).join(', ')}
-                </p>
-              </div>
-              <div className="text-right">
-                <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Total</p>
-                <p className="text-xl font-bold text-slate-900">₹{totalFare}</p>
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-
-        <motion.button
-          disabled={selectedSeats.length === 0 || !!error || loading}
-          whileTap={{ scale: 0.98 }}
-          onClick={() =>
-            navigate(`${routePrefix}/bus/checkout`, {
-              state: buildBusRouteState(state, {
-                bus: seatLayout?.bus || bus,
-                selectedSeats,
-                totalFare,
-              }),
-            })
-          }
-          className={`w-full py-4 rounded-2xl text-base font-bold flex items-center justify-center gap-2 transition-all ${
-            selectedSeats.length > 0 && !error && !loading
-              ? 'bg-slate-900 text-white shadow-lg active:scale-95'
-              : 'bg-slate-100 text-slate-400 cursor-not-allowed'
-          }`}
-        >
-          Proceed to Payment <ChevronRight size={18} />
-        </motion.button>
-      </div>
-    </div>
+      <FooterBar
+        label={selectedSeats.length ? `${selectedSeats.length} seat${selectedSeats.length > 1 ? 's' : ''} · ${selectedSeats.map((seat) => seat.label).join(', ')}` : 'No seat selected'}
+        value={formatRupees(totalFare)}
+        note="Fare before tax"
+        actionLabel="Continue"
+        disabled={!selectedSeats.length || loading || Boolean(error)}
+        onAction={() => navigate(`${routePrefix}/bus/checkout`, {
+          state: buildBusRouteState(state, { bus: seatLayout?.bus || bus, selectedSeats, totalFare }),
+        })}
+      />
+    </BusScreen>
   );
 };
 

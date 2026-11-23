@@ -1,13 +1,49 @@
 import { asyncHandler } from "../../../../utils/asyncHandler.js";
 import * as adminService from "../services/adminService.js";
+import { getDriverCancelStatus, resetDriverCancelCount } from "../../services/driverCancelLimitService.js";
+import { getPayment, listPayments } from '../../services/paymentLedgerService.js';
+import { getSubscriberReport, getSubscriptionAnalytics } from '../../services/subscriberReportService.js';
+import { buildPaymentInvoicePdf } from '../../services/invoiceService.js';
+import { hasAdminPermission } from "../services/adminAccessService.js";
+import * as landingContentService from "../services/landingContentService.js";
+import * as websiteEnquiryService from "../services/websiteEnquiryService.js";
 import ExcelJS from 'exceljs';
 import { BusBooking } from '../../user/models/BusBooking.js';
 import { BusService } from '../models/BusService.js';
 import { BusSeatHold } from '../../user/models/BusSeatHold.js';
+import { clearExpiredHoldsForSeats, publishBusSeatChange } from '../../bus/services/busSeatSyncService.js';
+import { cancelAndRefundFoodForBooking } from '../../bus/services/dhabaService.js';
+import { refundRazorpayPayment } from '../../bus/services/busRefundService.js';
+import { withBusCancellationClaim } from '../../bus/services/busPaymentService.js';
+import { priceBusSeats } from '../../bus/utils/busTime.js';
 import { getPublicActivePaymentGateway } from '../../services/paymentGatewayService.js';
-import { getOrLoadCachedValue } from '../../../../utils/cache.js';
+import { getOrLoadCachedValue, invalidateCachedPrefix, invalidateCachedValue } from '../../../../utils/cache.js';
+import { getMailConfigStatus, sendEmail } from '../../services/mailService.js';
+// Used ~40 times below but never imported: those paths threw ReferenceError
+// instead of the intended 4xx.
+import { ApiError } from '../../../../utils/ApiError.js';
+import { resolveScheduleRoute } from '../../bus/utils/busRoutes.js';
 
 const PUBLIC_BOOTSTRAP_CACHE_TTL_MS = 30_000;
+// These three public config caches all have a 30s TTL, and every one of them is
+// derived from data the admin panel edits. Without invalidation a save lands in
+// Mongo but the panel's refetch — and the app bootstrap the mobile clients read —
+// keep serving the old value, so the edit looks like it silently failed.
+//
+// app_bootstrap aggregates BOTH app modules and several general-settings
+// categories, so a write to either has to clear it too. That is why all writers
+// call the same helper rather than clearing just their own key.
+const APP_MODULES_CACHE_PREFIX = 'cache:public:app_modules:';
+const GENERAL_SETTINGS_CACHE_PREFIX = 'cache:public:general_settings:';
+const APP_BOOTSTRAP_CACHE_KEY = 'cache:public:app_bootstrap';
+
+const invalidatePublicConfigCaches = async () => {
+  await Promise.all([
+    invalidateCachedPrefix(APP_MODULES_CACHE_PREFIX),
+    invalidateCachedPrefix(GENERAL_SETTINGS_CACHE_PREFIX),
+    invalidateCachedValue(APP_BOOTSTRAP_CACHE_KEY),
+  ]);
+};
 
 const ok = (res, data, extra = {}) =>
   res.json({ success: true, data, ...extra });
@@ -46,11 +82,14 @@ const flattenBusBlueprintSeats = (blueprint = {}) =>
     .flatMap((row) => (Array.isArray(row) ? row : []))
     .filter((cell) => cell?.kind === 'seat' && cell?.id);
 
+// A zero or blank per-type price means "not set", so the bus fare applies.
+const positivePrice = (value) => (Number(value) > 0 ? Number(value) : undefined);
+
 const resolveBusSeatPrice = (busService = {}, seat = {}) => {
   const variantPricing = busService?.variantPricing || {};
   const defaultPrice = Number(busService?.seatPrice || 0);
   const variantKey = String(seat?.variant || 'seat').trim().toLowerCase();
-  const resolvedPrice = variantPricing?.[variantKey] ?? variantPricing?.seat ?? defaultPrice;
+  const resolvedPrice = positivePrice(variantPricing?.[variantKey]) ?? positivePrice(variantPricing?.seat) ?? defaultPrice;
 
   return Number.isFinite(Number(resolvedPrice)) ? Number(resolvedPrice) : defaultPrice;
 };
@@ -113,7 +152,8 @@ const buildAdminBusSeatLayout = async ({ busService, scheduleId, travelDate }) =
     busServiceId: busService._id,
     scheduleId,
     travelDate,
-    status: { $in: ['held', 'booked'] },
+    // Expired holds don't count, even before the sweeper removes them.
+    $or: [{ status: 'booked' }, { status: 'held', expiresAt: { $gt: new Date() } }],
   }).lean();
 
   const holdMap = new Map();
@@ -331,7 +371,7 @@ export const getAdminStatus = asyncHandler(async (_req, res) =>
   ok(res, await adminService.getAdminModuleInfo()),
 );
 export const loginAdmin = asyncHandler(async (req, res) =>
-  ok(res, await adminService.loginAdmin(req.body)),
+  ok(res, await adminService.loginAdmin({ ...req.body, ip: req.ip || '' })),
 );
 export const forgotPassword = asyncHandler(async (req, res) =>
   ok(res, await adminService.forgotPassword(req.body.email)),
@@ -353,6 +393,9 @@ export const createAdminAccount = asyncHandler(async (req, res) =>
 );
 export const updateAdminAccount = asyncHandler(async (req, res) =>
   ok(res, await adminService.updateAdminAccount(req.auth?.admin, req.params.id, req.body)),
+);
+export const getAdminActivitySummary = asyncHandler(async (req, res) =>
+  ok(res, await adminService.getAdminActivitySummary(req.auth?.admin)),
 );
 export const deleteAdminAccount = asyncHandler(async (req, res) => {
   await adminService.deleteAdminAccount(req.auth?.admin, req.params.id);
@@ -545,6 +588,12 @@ export const createDriver = asyncHandler(async (req, res) =>
 export const getDriver = asyncHandler(async (req, res) =>
   ok(res, await adminService.getDriverById(req.params.id, req.auth?.admin)),
 );
+export const getDriverCancellationLimit = asyncHandler(async (req, res) =>
+  ok(res, await getDriverCancelStatus(req.params.id)),
+);
+export const resetDriverCancellationLimit = asyncHandler(async (req, res) =>
+  ok(res, await resetDriverCancelCount(req.params.id)),
+);
 export const getDriverProfile = asyncHandler(async (req, res) =>
   ok(res, await adminService.getDriverProfile(req.params.id)),
 );
@@ -572,12 +621,48 @@ export const getSubscriptionPlans = asyncHandler(async (_req, res) =>
 export const createSubscriptionPlan = asyncHandler(async (req, res) =>
   ok(res, await adminService.createSubscriptionPlan(req.body)),
 );
+export const updateSubscriptionPlan = asyncHandler(async (req, res) =>
+  ok(res, await adminService.updateSubscriptionPlan(req.params.id, req.body)),
+);
+export const deleteSubscriptionPlan = asyncHandler(async (req, res) =>
+  ok(res, await adminService.deleteSubscriptionPlan(req.params.id)),
+);
+export const getDriverSubscriptionPayments = asyncHandler(async (req, res) =>
+  ok(res, await adminService.listDriverSubscriptionPayments(req.query)),
+);
 export const getCustomerSubscriptionPlans = asyncHandler(async (_req, res) =>
   ok(res, { results: await adminService.listCustomerSubscriptionPlans() }),
 );
 export const createCustomerSubscriptionPlan = asyncHandler(async (req, res) =>
   ok(res, await adminService.createCustomerSubscriptionPlan(req.body)),
 );
+export const updateCustomerSubscriptionPlan = asyncHandler(async (req, res) =>
+  ok(res, await adminService.updateCustomerSubscriptionPlan(req.params.id, req.body)),
+);
+export const updateDriverSubscriptionExpiry = asyncHandler(async (req, res) =>
+  ok(res, await adminService.updateDriverSubscriptionExpiry(req.params.id, req.body, req.auth?.sub)),
+);
+export const updateUserSubscriptionExpiry = asyncHandler(async (req, res) =>
+  ok(res, await adminService.updateUserSubscriptionExpiry(req.params.id, req.body, req.auth?.sub)),
+);
+export const getBusVendorWallets = asyncHandler(async (_req, res) => {
+  const { listVendorWallets } = await import('../../bus/services/busVendorWalletService.js');
+  ok(res, { results: await listVendorWallets() });
+});
+export const getBusVendorWalletTransactions = asyncHandler(async (req, res) => {
+  const { listVendorWalletTransactions } = await import('../../bus/services/busVendorWalletService.js');
+  ok(res, { results: await listVendorWalletTransactions({ accountType: req.params.type, accountId: req.params.id }) });
+});
+export const adjustBusVendorWallet = asyncHandler(async (req, res) => {
+  const { adjustVendorWallet } = await import('../../bus/services/busVendorWalletService.js');
+  ok(res, await adjustVendorWallet({
+    accountType: req.params.type,
+    accountId: req.params.id,
+    amount: req.body?.amount,
+    note: req.body?.note,
+    adminId: req.auth?.sub,
+  }));
+});
 export const getUserSubscriptions = asyncHandler(async (req, res) =>
   ok(res, await adminService.listUserSubscriptionsByUserId(req.params.id)),
 );
@@ -664,6 +749,12 @@ export const getOngoingRides = asyncHandler(async (req, res) =>
 );
 export const getRideRequests = asyncHandler(async (req, res) =>
   ok(res, await adminService.listRideRequests(req.query)),
+);
+export const cancelRideRequest = asyncHandler(async (req, res) =>
+  ok(res, await adminService.cancelRideRequestAsAdmin(req.params.id, req.body || {}, req.auth?.admin)),
+);
+export const deleteRideRequest = asyncHandler(async (req, res) =>
+  ok(res, await adminService.deleteRideRequestAsAdmin(req.params.id, req.auth?.admin)),
 );
 export const getDeliveries = asyncHandler(async (req, res) =>
   ok(res, await adminService.listDeliveries(req.query)),
@@ -766,6 +857,10 @@ export const getOverallEarnings = asyncHandler(async (_req, res) =>
 export const getAdminEarnings = asyncHandler(async (req, res) =>
   ok(res, await adminService.getAdminEarnings(req.query)),
 );
+/// The rows behind one Admin Earnings card (?metric=...).
+export const getAdminEarningDetails = asyncHandler(async (req, res) =>
+  ok(res, await adminService.getAdminEarningDetails(req.query)),
+);
 export const getTodayEarnings = asyncHandler(async (_req, res) =>
   ok(res, await adminService.getTodayEarnings()),
 );
@@ -834,6 +929,19 @@ export const getPendingBusDriverSignups = asyncHandler(async (_req, res) =>
 export const createBusService = asyncHandler(async (req, res) =>
   ok(res, await adminService.createBusService(req.body)),
 );
+/// Upcoming bookings on a bus, so renumbering its seats can warn about tickets
+/// already issued. India's date, like travelDate.
+export const getBusServiceUpcomingBookings = asyncHandler(async (req, res) => {
+  const today = new Date(Date.now() + 5.5 * 3600_000).toISOString().slice(0, 10);
+  ok(res, {
+    count: await BusBooking.countDocuments({
+      busServiceId: req.params.id,
+      status: 'confirmed',
+      travelDate: { $gte: today },
+    }),
+  });
+});
+
 export const updateBusService = asyncHandler(async (req, res) =>
   ok(res, await adminService.updateBusService(req.params.id, req.body)),
 );
@@ -1134,9 +1242,9 @@ export const createAdminBusBooking = asyncHandler(async (req, res) => {
     throw new ApiError(409, `Seat ${invalidSeat} is not available`);
   }
 
-  const amount = Math.round(
-    seatIds.reduce((sum, seatId) => sum + resolveBusSeatPrice(busService, availableSeatMap.get(seatId)), 0) * 100,
-  ) / 100;
+  // Seat-type fares plus the bus's tax, as in the rider app.
+  const pricing = priceBusSeats(busService, seatIds.map((seatId) => availableSeatMap.get(seatId)));
+  const amount = pricing.amount;
   const booking = await BusBooking.create({
     userId: user._id,
     busServiceId: busService._id,
@@ -1145,6 +1253,7 @@ export const createAdminBusBooking = asyncHandler(async (req, res) => {
     travelDate,
     seatIds,
     seatLabels: seatIds.map((seatId) => availableSeatMap.get(seatId)?.label || seatId),
+    seatPrices: pricing.seatPrices,
     passenger,
     amount,
     bookingSource: 'admin',
@@ -1152,15 +1261,19 @@ export const createAdminBusBooking = asyncHandler(async (req, res) => {
     status: 'confirmed',
     expiresAt: null,
     routeSnapshot: {
-      originCity: busService.route?.originCity || '',
-      destinationCity: busService.route?.destinationCity || '',
+      originCity: resolveScheduleRoute(busService, schedule).originCity || '',
+      destinationCity: resolveScheduleRoute(busService, schedule).destinationCity || '',
       departureTime: schedule?.departureTime || '',
       arrivalTime: schedule?.arrivalTime || '',
-      durationHours: busService.route?.durationHours || '',
+      durationHours: resolveScheduleRoute(busService, schedule).durationHours || '',
       busName: busService.busName || '',
       operatorName: busService.operatorName || '',
       coachType: busService.coachType || '',
       busCategory: busService.busCategory || '',
+      serviceTaxPercentage: pricing.serviceTaxPercentage,
+      baseAmount: pricing.baseAmount,
+      serviceTaxAmount: pricing.serviceTaxAmount,
+      totalAmount: pricing.amount,
     },
     payment: {
       provider: 'manual',
@@ -1173,6 +1286,7 @@ export const createAdminBusBooking = asyncHandler(async (req, res) => {
     notes,
   });
 
+  await clearExpiredHoldsForSeats({ busServiceId: busService._id, scheduleId, travelDate, seatIds });
   try {
     await BusSeatHold.insertMany(
       seatIds.map((seatId) => ({
@@ -1189,12 +1303,22 @@ export const createAdminBusBooking = asyncHandler(async (req, res) => {
       { ordered: true },
     );
   } catch (error) {
+    await BusSeatHold.deleteMany({ bookingId: booking._id });
     await BusBooking.deleteOne({ _id: booking._id });
     if (error?.code === 11000) {
       throw new ApiError(409, 'One or more selected seats were just booked');
     }
     throw error;
   }
+
+  publishBusSeatChange({
+    busServiceId: busService._id,
+    scheduleId,
+    travelDate,
+    change: 'booked',
+    seatIds,
+    bookingId: booking._id,
+  });
 
   const hydratedBooking = await BusBooking.findById(booking._id)
     .populate('userId', 'name phone email')
@@ -1209,6 +1333,19 @@ export const createAdminBusBooking = asyncHandler(async (req, res) => {
 });
 
 export const cancelAdminBusBookingSeats = asyncHandler(async (req, res) => {
+  const claimId = toCleanString(req.params?.id);
+  if (!mongoose.Types.ObjectId.isValid(claimId)) {
+    return cancelAdminBusBookingSeatsClaimed(req, res);
+  }
+  try {
+    return await withBusCancellationClaim({ _id: claimId }, () => cancelAdminBusBookingSeatsClaimed(req, res));
+  } catch (error) {
+    if (error?.statusCode === 409 && !(error instanceof ApiError)) throw new ApiError(409, error.message);
+    throw error;
+  }
+});
+
+const cancelAdminBusBookingSeatsClaimed = async (req, res) => {
   const bookingId = toCleanString(req.params?.id);
   const selectedSeatIds = Array.isArray(req.body?.seatIds)
     ? [...new Set(req.body.seatIds.map((item) => toCleanString(item)).filter(Boolean))]
@@ -1254,16 +1391,42 @@ export const cancelAdminBusBookingSeats = asyncHandler(async (req, res) => {
   }
 
   const cancelledAt = new Date();
+
+  // The operator released seats a rider paid for online: the rider gets those
+  // seats' money back in full (their own seat prices, else the average).
+  const paidOnline = String(booking.payment?.provider || 'razorpay') === 'razorpay'
+    && Boolean(toCleanString(booking.payment?.paymentId));
+  const seatPriceMap = new Map(
+    (Array.isArray(booking.seatPrices) ? booking.seatPrices : []).map((item) => [toCleanString(item?.seatId), Number(item?.amount || 0)]),
+  );
+  const averageSeatAmount = originalSeatIds.length ? Number(booking.amount || 0) / originalSeatIds.length : 0;
+  const seatRefunds = seatsToCancel.map((item) =>
+    paidOnline ? Math.round((seatPriceMap.has(item.seatId) ? seatPriceMap.get(item.seatId) : averageSeatAmount) * 100) / 100 : 0,
+  );
+  const refundTotal = Math.round(seatRefunds.reduce((sum, value) => sum + value, 0) * 100) / 100;
+  let refund = null;
+  if (refundTotal > 0) {
+    refund = await refundRazorpayPayment({
+      paymentId: toCleanString(booking.payment.paymentId),
+      amount: refundTotal,
+      notes: {
+        bookingCode: booking.bookingCode || '',
+        reason: 'released_by_admin',
+        seats: seatsToCancel.map((item) => item.seatLabel || item.seatId).join(', '),
+      },
+    });
+  }
+
   booking.cancelledSeats = [
     ...cancelledSeats,
-    ...seatsToCancel.map((item) => ({
+    ...seatsToCancel.map((item, index) => ({
       seatId: item.seatId,
       seatLabel: item.seatLabel,
       cancelledAt,
-      refundAmount: 0,
+      refundAmount: seatRefunds[index],
       chargeAmount: 0,
-      refundStatus: 'admin_cancelled',
-      refundId: '',
+      refundStatus: refund ? (refund.status || 'processed') : 'admin_cancelled',
+      refundId: refund?.id || '',
       refundProcessedAt: cancelledAt,
       notes: adminNote,
     })),
@@ -1276,13 +1439,16 @@ export const cancelAdminBusBookingSeats = asyncHandler(async (req, res) => {
     allowed: remainingActiveSeatCount > 0,
     appliedRuleId: '',
     appliedRuleLabel: 'Admin seat release',
-    refundType: 'none',
-    refundValue: 0,
+    refundType: refundTotal > 0 ? 'full' : 'none',
+    refundValue: refundTotal > 0 ? 100 : 0,
     hoursBeforeDeparture: 0,
-    refundAmount: 0,
+    refundAmount: refundTotal,
     chargeAmount: 0,
     notes: adminNote,
   };
+  if (refund) {
+    booking.payment.status = remainingActiveSeatCount <= 0 ? 'refunded' : 'partially_refunded';
+  }
   if (!booking.notes?.includes(adminNote)) {
     booking.notes = [booking.notes, adminNote].filter(Boolean).join(' | ');
   }
@@ -1293,6 +1459,17 @@ export const cancelAdminBusBookingSeats = asyncHandler(async (req, res) => {
     status: { $in: ['held', 'booked'] },
     seatId: { $in: seatsToCancel.map((item) => item.seatId) },
   });
+  publishBusSeatChange({
+    busServiceId: booking.busServiceId,
+    scheduleId: booking.scheduleId,
+    travelDate: booking.travelDate,
+    change: 'released',
+    seatIds: seatsToCancel.map((item) => item.seatId),
+    bookingId: booking._id,
+  });
+  if (remainingActiveSeatCount <= 0) {
+    await cancelAndRefundFoodForBooking(booking, { reason: 'Cancelled by ZI Bus admin', by: 'admin' });
+  }
 
   const hydratedBooking = await BusBooking.findById(booking._id)
     .populate('userId', 'name phone email')
@@ -1307,7 +1484,7 @@ export const cancelAdminBusBookingSeats = asyncHandler(async (req, res) => {
         ? 'Booking cancelled and seats released successfully'
         : 'Selected seats unbooked successfully',
   });
-});
+};
 
 export const getRentalVehicleTypes = asyncHandler(async (_req, res) =>
   ok(res, { results: await adminService.listRentalVehicleTypes() }),
@@ -1474,14 +1651,19 @@ export const getAppModules = asyncHandler(async (req, res) => {
 
   ok(res, data);
 });
-export const createAppModule = asyncHandler(async (req, res) =>
-  ok(res, await adminService.createAppModule(req.body)),
-);
-export const updateAppModule = asyncHandler(async (req, res) =>
-  ok(res, await adminService.updateAppModule(req.params.id, req.body)),
-);
+export const createAppModule = asyncHandler(async (req, res) => {
+  const result = await adminService.createAppModule(req.body);
+  await invalidatePublicConfigCaches();
+  ok(res, result);
+});
+export const updateAppModule = asyncHandler(async (req, res) => {
+  const result = await adminService.updateAppModule(req.params.id, req.body);
+  await invalidatePublicConfigCaches();
+  ok(res, result);
+});
 export const deleteAppModule = asyncHandler(async (req, res) => {
   await adminService.deleteAppModule(req.params.id);
+  await invalidatePublicConfigCaches();
   ok(res, { deleted: true });
 });
 
@@ -1559,6 +1741,42 @@ export const getMailSettings = asyncHandler(async (_req, res) =>
 export const updateMailSettings = asyncHandler(async (req, res) =>
   ok(res, { settings: await adminService.updateMailSettings(req.body) }),
 );
+
+/**
+ * Sends a real message using whatever SMTP is currently saved, so the panel can
+ * prove the credentials work. The previous "Send Test Mail" button only waited
+ * 1.2s in the browser and always reported success.
+ */
+export const sendTestMail = asyncHandler(async (req, res) => {
+  const status = await getMailConfigStatus();
+
+  if (!status.configured) {
+    throw new ApiError(400, `SMTP is not configured: missing ${status.missing.join(', ')}`);
+  }
+
+  const to = String(req.body?.to || '').trim() || req.auth?.email;
+
+  if (!to) {
+    throw new ApiError(400, 'A recipient address is required');
+  }
+
+  try {
+    await sendEmail({
+      to,
+      subject: 'ZI CAB SMTP test',
+      text: `This is a test message from the ZI CAB admin panel.
+
+SMTP host: ${status.host}:${status.port}
+If you received this, outgoing mail works.`,
+    });
+  } catch (error) {
+    // Surface the SMTP reason — this endpoint is admin-only and the whole point
+    // is to diagnose credentials.
+    throw new ApiError(502, `SMTP rejected the message: ${error.message}`);
+  }
+
+  ok(res, { sent: true, to, host: status.host, port: status.port });
+});
 
 export const getRechargeApiSettings = asyncHandler(async (_req, res) =>
   ok(res, await adminService.getRechargeApiSettings()),
@@ -1652,12 +1870,11 @@ export const getUserHomeManagement = asyncHandler(async (req, res) => {
   const result = await adminService.getGeneralSettings('user-home-management');
   ok(res, result.settings || {});
 });
-export const updateGeneralSettingsCategory = asyncHandler(async (req, res) =>
-  ok(
-    res,
-    await adminService.updateGeneralSettings(req.params.category, req.body),
-  ),
-);
+export const updateGeneralSettingsCategory = asyncHandler(async (req, res) => {
+  const result = await adminService.updateGeneralSettings(req.params.category, req.body);
+  await invalidatePublicConfigCaches();
+  ok(res, result);
+});
 export const getTransportTypes = asyncHandler(async (_req, res) =>
   ok(res, await adminService.listTransportTypes()),
 );
@@ -1693,3 +1910,114 @@ export const getAppBootstrap = asyncHandler(async (_req, res) => {
 
   ok(res, data);
 });
+
+// ---- public marketing site content -----------------------------------------
+export const getPublicLandingContent = asyncHandler(async (_req, res) =>
+  ok(res, await landingContentService.getLandingContent()),
+);
+// Separate from the landing payload on purpose - these documents are large and
+// only the legal routes need them.
+export const getPublicLegalContent = asyncHandler(async (_req, res) =>
+  ok(res, await landingContentService.getLegalContent()),
+);
+// The router-level authenticate(['admin']) gate lets any admin through, so the
+// per-permission check happens here - matching how the rest of admin does it.
+const assertLandingContentAccess = (admin) => {
+  if (!hasAdminPermission(admin, 'landing_content.view')) {
+    throw new ApiError(403, 'You do not have permission to access website content');
+  }
+};
+export const getAdminLandingContent = asyncHandler(async (req, res) => {
+  assertLandingContentAccess(req.auth?.admin);
+  ok(res, await landingContentService.getLandingContent({ fresh: true, includeLegal: true }));
+});
+export const saveAdminLandingContent = asyncHandler(async (req, res) => {
+  assertLandingContentAccess(req.auth?.admin);
+  ok(res, await landingContentService.updateLandingContent(req.body));
+});
+
+// ---- website enquiries (public marketing forms) ----------------------------
+export const submitWebsiteEnquiry = asyncHandler(async (req, res) => {
+  const data = await websiteEnquiryService.createWebsiteEnquiry(req.body);
+  res.status(201).json({
+    success: true,
+    data: { message: 'Thanks - we have your details and will be in touch.', ...data },
+  });
+});
+
+const assertEnquiryAccess = (admin) => {
+  if (!hasAdminPermission(admin, 'enquiries.view')) {
+    throw new ApiError(403, 'You do not have permission to access website enquiries');
+  }
+};
+
+export const getWebsiteEnquiries = asyncHandler(async (req, res) => {
+  assertEnquiryAccess(req.auth?.admin);
+  ok(res, await websiteEnquiryService.listWebsiteEnquiries(req.query));
+});
+
+export const patchWebsiteEnquiry = asyncHandler(async (req, res) => {
+  assertEnquiryAccess(req.auth?.admin);
+  ok(res, await websiteEnquiryService.updateWebsiteEnquiry(req.params.id, req.body));
+});
+
+// ── Price hike (surge) ───────────────────────────────────────────────────────
+export const getPriceHikes = asyncHandler(async (req, res) =>
+  ok(res, await adminService.listPriceHikes(req.auth?.admin)),
+);
+export const createPriceHike = asyncHandler(async (req, res) =>
+  ok(res, await adminService.createPriceHike(req.body, req.auth?.admin)),
+);
+export const updatePriceHike = asyncHandler(async (req, res) =>
+  ok(res, await adminService.updatePriceHike(req.params.id, req.body, req.auth?.admin)),
+);
+export const deletePriceHike = asyncHandler(async (req, res) => {
+  await adminService.deletePriceHike(req.params.id, req.auth?.admin);
+  ok(res, { deleted: true });
+});
+
+export const getAutomaticSurge = asyncHandler(async (req, res) =>
+  ok(res, await adminService.getAutomaticSurge(req.auth?.admin)),
+);
+export const updateAutomaticSurge = asyncHandler(async (req, res) =>
+  ok(res, await adminService.updateAutomaticSurge(req.body, req.auth?.admin)),
+);
+export const resetVehicleAutomaticSurge = asyncHandler(async (req, res) =>
+  ok(res, await adminService.resetVehicleAutomaticSurge(req.params.vehicleTypeId, req.auth?.admin)),
+);
+
+/// Every payment - ride fares, driver passes, wallet top-ups - for the
+/// admin Payments page. Filters: kind, method, from, to, q, page, limit.
+export const getPayments = asyncHandler(async (req, res) =>
+  ok(res, await listPayments(req.query || {})),
+);
+
+/// Daily-pass subscribers for one pass day (6 AM to 6 AM IST): totals, the
+/// 6 PM closing, vehicle-, service- and plan-wise splits, and the list.
+/// Filters: date (YYYY-MM-DD), vehicle_class, vehicle_type_id.
+export const getPaymentSubscribers = asyncHandler(async (req, res) =>
+  ok(res, await getSubscriberReport({
+    date: req.query?.date,
+    vehicleClass: req.query?.vehicle_class,
+    vehicleTypeId: req.query?.vehicle_type_id,
+  })),
+);
+
+/// The invoice (rides) or receipt (everything else) for one payment, as a PDF.
+export const getPaymentInvoice = asyncHandler(async (req, res) => {
+  const payment = await getPayment(req.params.kind, req.params.id);
+  if (!payment) {
+    res.status(404).json({ success: false, message: 'Payment not found' });
+    return;
+  }
+  const { buffer, filename } = await buildPaymentInvoicePdf(payment);
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.send(buffer);
+});
+
+/// Driver Subscription Analytics: cards per vehicle class, trend, list,
+/// renewals for a range of pass days (?from&to&vehicleClass&method&status&q).
+export const getDriverSubscriptionAnalytics = asyncHandler(async (req, res) =>
+  ok(res, await getSubscriptionAnalytics(req.query || {})),
+);

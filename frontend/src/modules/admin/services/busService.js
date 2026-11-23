@@ -94,6 +94,7 @@ const createEmptyRoute = () => ({
   distanceKm: '',
   durationHours: '',
   stops: [],
+  autoTimings: true,
 });
 
 const normalizeDeckConfig = (value = {}, fallback = {}) => {
@@ -212,7 +213,7 @@ export const BUS_BLUEPRINT_TEMPLATES = [
     key: 'sleeper_2_1',
     label: 'Sleeper 2+1',
     category: 'Sleeper Coach',
-    description: 'Popular RedBus-style sleeper stack',
+    description: 'Two berths, aisle, one berth - the common sleeper layout',
     layoutConfig: {
       lower: { enabled: true, rows: 6, leftSeats: 2, rightSeats: 1, seatType: 'sleeper' },
       upper: { enabled: true, rows: 6, leftSeats: 2, rightSeats: 1, seatType: 'sleeper' },
@@ -293,6 +294,7 @@ export const createBusDraft = () => ({
     destinationCoords: null,
     distanceKm: '',
     durationHours: '',
+    autoTimings: true,
     stops: [
       {
         id: createId('stop'),
@@ -314,6 +316,7 @@ export const createBusDraft = () => ({
   },
   returnRouteEnabled: false,
   returnRoute: createEmptyRoute(),
+  extraRoutes: [],
   schedules: [
     {
       id: createId('schedule'),
@@ -322,6 +325,7 @@ export const createBusDraft = () => ({
       arrivalTime: '06:15',
       activeDays: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'],
       status: 'active',
+      routeKey: 'main',
     },
   ],
   status: 'draft',
@@ -341,6 +345,10 @@ export const normalizeBusCatalog = (catalog = []) =>
     if (Array.isArray(blueprintSource?.lowerDeck) && blueprintSource.lowerDeck.length) {
       blueprint.lowerDeck = blueprintSource.lowerDeck;
     }
+    if (blueprintSource?.seatNumbering?.mode) {
+      blueprint.seatNumbering = blueprintSource.seatNumbering;
+    }
+    blueprint.seatLayoutOrientation = blueprintSource?.seatLayoutOrientation === 'vertical' ? 'vertical' : 'horizontal';
     if (Array.isArray(blueprintSource?.upperDeck)) {
       blueprint.upperDeck = blueprintSource.upperDeck;
     }
@@ -388,6 +396,13 @@ export const normalizeBusCatalog = (catalog = []) =>
             ? bus.returnRoute.stops
             : [],
       },
+      extraRoutes: (Array.isArray(bus.extraRoutes) ? bus.extraRoutes : []).map((item) => ({
+        ...createEmptyRoute(),
+        ...item,
+        originCoords: normalizeLatLng(item?.originCoords),
+        destinationCoords: normalizeLatLng(item?.destinationCoords),
+        stops: Array.isArray(item?.stops) ? item.stops : [],
+      })),
       schedules:
         Array.isArray(bus.schedules) && bus.schedules.length > 0 ? bus.schedules : fallbackDraft.schedules,
       amenities:

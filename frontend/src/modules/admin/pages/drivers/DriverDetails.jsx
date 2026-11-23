@@ -14,7 +14,9 @@ import {
   CheckCircle2,
 } from 'lucide-react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
+import toast from 'react-hot-toast';
 import { adminService } from '../../services/adminService';
+import { uploadService } from '../../../../shared/services/uploadService';
 import { DELHI_CENTER, HAS_VALID_GOOGLE_MAPS_KEY, useBaseGoogleMapsLoader } from '../../utils/googleMaps';
 import BikeIcon from '@/assets/icons/bike.png';
 import CarIcon from '@/assets/icons/car.png';
@@ -29,6 +31,7 @@ import PremiumIcon from '@/assets/icons/Premium.png';
 import SuvIcon from '@/assets/icons/SUV.png';
 
 const mapContainerStyle = { width: '100%', height: '100%' };
+const CANCEL_PERIOD_WORDS = { day: 'today', week: 'this week', month: 'this month' };
 
 const getMapIconForVehicle = (iconType = '') => {
   const raw = String(iconType || '').trim();
@@ -128,6 +131,15 @@ const getDocumentVerificationType = (doc = {}, fallbackKey = '') => {
   const explicitType = String(doc?.verificationType ?? doc?.verification_type ?? '').trim().toLowerCase();
   if (['driving_license', 'pan', 'gstin', 'rc', 'bank_account'].includes(explicitType)) {
     return explicitType;
+  }
+
+  // The admin configured this document type and said it needs no external
+  // check, so stop here. Guessing from the key below is only for documents
+  // with no configured type, and it reads the storage key rather than the
+  // document: the insurance paper is stored under `panCard`, which made the
+  // page announce "PAN Verify" over a photo of an insurance certificate.
+  if (doc?.hasTemplate) {
+    return 'none';
   }
 
   const haystack = [
@@ -413,9 +425,13 @@ const normalizeDocumentEntry = (doc = {}, fallbackKey = '') => {
 
   return {
     sourceKey: doc?.key || doc?.documentKey || doc?.type || fallbackKey || doc?.name || '',
+    // What the admin calls this document type, when the backend matched it to
+    // one. Preferred over the storage key everywhere it is shown.
+    label: doc?.label || '',
+    hasTemplate: Boolean(doc?.hasTemplate),
     name:
-      doc?.name ||
       doc?.label ||
+      doc?.name ||
       humanizeDocumentKey(doc?.key || doc?.documentKey || doc?.type || fallbackKey) ||
       doc?.fileName ||
       'Document',
@@ -441,13 +457,109 @@ const DriverDetails = () => {
   const location = useLocation();
   const { id } = useParams();
   const [activeTab, setActiveTab] = useState('Driver Profile');
+  const [cancelLimit, setCancelLimit] = useState(null);
+  const [resettingCancelLimit, setResettingCancelLimit] = useState(false);
   const [profile, setProfile] = useState(null);
-  const [walletForm, setWalletForm] = useState({ amount: '', operation: 'credit', isSubmitting: false });
+  const [upiActionBusy, setUpiActionBusy] = useState(false);
+  const [upiEditing, setUpiEditing] = useState(false);
+  const [upiIdDraft, setUpiIdDraft] = useState('');
+  const [qrDraft, setQrDraft] = useState(''); // data URL of a newly picked QR
+  const [walletForm, setWalletForm] = useState({ amount: '', operation: 'set', description: '', isSubmitting: false });
   const [walletHistory, setWalletHistory] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState('');
   const [avatarFailed, setAvatarFailed] = useState(false);
   const [documentActionKey, setDocumentActionKey] = useState('');
+  // The document card being edited, and its unsaved values. Only one card is
+  // open at a time so a save can never carry another card's draft with it.
+  const [editingDocKey, setEditingDocKey] = useState('');
+  const [docDraft, setDocDraft] = useState({ identify_number: '', expiry_date: '', image: '', fileName: '' });
+
+  const startEditingDocument = (doc) => {
+    const expiry = String(doc.expiry_date || '');
+    setEditingDocKey(doc.sourceKey);
+    setDocDraft({
+      identify_number: doc.identify_number || '',
+      // A date input only takes YYYY-MM-DD; anything else starts blank rather
+      // than showing a value the input would silently drop.
+      expiry_date: /^\d{4}-\d{2}-\d{2}/.test(expiry) ? expiry.slice(0, 10) : '',
+      image: '',
+      fileName: '',
+    });
+  };
+
+  const pickReplacementDocument = (file) => {
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      window.alert('Only image files can be uploaded as a document.');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => setDocDraft((draft) => ({ ...draft, image: reader.result, fileName: file.name }));
+    reader.onerror = () => window.alert('Could not read that file.');
+    reader.readAsDataURL(file);
+  };
+
+  /// Saves the admin's corrections to one document. The review status is left
+  /// as it was: fixing a typo in a number is not an approval or a rejection.
+  const saveDocumentEdit = async (doc) => {
+    if (!doc.sourceKey) return;
+
+    try {
+      setDocumentActionKey(`${doc.sourceKey}:edit`);
+      const existing = profile?.documents?.[doc.sourceKey] || {};
+      let images = doc.images || existing.images || [];
+      let fileNames = doc.fileNames || existing.fileNames || [];
+
+      if (docDraft.image) {
+        const uploaded = await uploadService.uploadImage(docDraft.image, 'driver-documents');
+        const url = uploaded?.url || uploaded?.data?.url || uploaded?.secureUrl;
+        if (!url) throw new Error('Upload finished but returned no file link');
+        images = [url];
+        fileNames = [docDraft.fileName || doc.name || doc.sourceKey];
+      }
+
+      const token = localStorage.getItem('adminToken');
+      const nextDocuments = {
+        ...(profile?.documents || {}),
+        [doc.sourceKey]: {
+          ...existing,
+          key: doc.sourceKey,
+          name: doc.name,
+          status: existing.status || doc.status || 'pending',
+          fileName: fileNames[0] || doc.name || doc.sourceKey,
+          previewUrl: images[0] || existing.previewUrl || '',
+          secureUrl: images[0] || existing.secureUrl || '',
+          images,
+          fileNames,
+          identify_number: String(docDraft.identify_number || '').trim(),
+          expiry_date: docDraft.expiry_date || '',
+          ...(docDraft.image ? { uploadedAt: new Date().toISOString() } : {}),
+        },
+      };
+
+      const response = await fetch(
+        `${globalThis.__LEGACY_BACKEND_ORIGIN__}/api/v1/admin/drivers/${id}`,
+        {
+          method: 'PATCH',
+          headers: {
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ documents: nextDocuments }),
+        },
+      );
+      const data = await response.json();
+      if (!response.ok || !data?.success) throw new Error(data?.message || 'Unable to save document');
+
+      setEditingDocKey('');
+      await fetchProfile();
+    } catch (err) {
+      window.alert(err?.message || 'Unable to save document');
+    } finally {
+      setDocumentActionKey('');
+    }
+  };
 
   const tabs = [
     'Driver Profile',
@@ -458,6 +570,34 @@ const DriverDetails = () => {
     'Documents',
     'Subscription',
   ];
+
+  useEffect(() => {
+    let active = true;
+    adminService.getDriverCancellationLimit(id)
+      .then((response) => {
+        if (active) setCancelLimit(response?.data?.data || response?.data || response || null);
+      })
+      .catch(() => {
+        if (active) setCancelLimit(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [id]);
+
+  const handleResetCancelLimit = async () => {
+    if (!window.confirm("Give this driver back all of this period's ride cancellations?")) return;
+    setResettingCancelLimit(true);
+    try {
+      const response = await adminService.resetDriverCancellationLimit(id);
+      setCancelLimit(response?.data?.data || response?.data || response || null);
+      toast.success('Cancellations reset');
+    } catch (error) {
+      toast.error(error?.message || 'Could not reset');
+    } finally {
+      setResettingCancelLimit(false);
+    }
+  };
 
   const fetchProfile = async () => {
     setIsLoading(true);
@@ -554,8 +694,10 @@ const DriverDetails = () => {
       ),
     },
     {
-      label: 'Vehicle Type',
+      label: profile?.vehicle_types?.length > 1 ? 'Vehicle Types' : 'Vehicle Type',
+      // Every type the driver enrolled, not just the first one.
       value:
+        (profile?.vehicle_types || []).map((item) => item.name).filter(Boolean).join(', ') ||
         onboardingVehicle.vehicleType ||
         profile?.vehicle?.type ||
         profile?.vehicle_type ||
@@ -765,6 +907,23 @@ const DriverDetails = () => {
         </div>
       </div>
 
+      {cancelLimit?.enabled ? (
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-gray-200 bg-white px-4 py-3">
+          <p className="text-sm text-gray-700">
+            <span className="font-semibold">Ride cancellations:</span>{' '}
+            {cancelLimit.used} of {cancelLimit.limit} used {CANCEL_PERIOD_WORDS[cancelLimit.period] || ''}
+          </p>
+          <button
+            type="button"
+            disabled={resettingCancelLimit || !cancelLimit.used}
+            onClick={handleResetCancelLimit}
+            className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs font-semibold text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {resettingCancelLimit ? 'Resetting...' : 'Reset'}
+          </button>
+        </div>
+      ) : null}
+
       <div className="flex flex-wrap gap-2 mb-4">
         {tabs.map((tab) => (
           <button
@@ -867,19 +1026,8 @@ const DriverDetails = () => {
               </div>
 
               <div className="bg-white rounded-xl border border-gray-200 p-6">
-                <h3 className="text-sm text-gray-900 mb-4 font-bold">Credit or Debit wallet</h3>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-xs font-semibold text-gray-500 mb-1.5">Amount *</label>
-                    <input
-                      type="number"
-                      min="0"
-                      className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm text-gray-800 bg-white focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none transition-colors"
-                      placeholder="Enter Amount"
-                      value={walletForm.amount}
-                      onChange={(e) => setWalletForm((prev) => ({ ...prev, amount: e.target.value }))}
-                    />
-                  </div>
+                <h3 className="text-sm text-gray-900 mb-4 font-bold">Manage Driver Wallet Balance</h3>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                   <div>
                     <label className="block text-xs font-semibold text-gray-500 mb-1.5">Operation *</label>
                     <select
@@ -887,42 +1035,65 @@ const DriverDetails = () => {
                       value={walletForm.operation}
                       onChange={(e) => setWalletForm((prev) => ({ ...prev, operation: e.target.value }))}
                     >
-                      <option value="credit">Credit</option>
-                      <option value="debit">Debit</option>
+                      <option value="set">Set Exact Balance (=)</option>
+                      <option value="credit">Credit (+ Add)</option>
+                      <option value="debit">Debit (- Deduct)</option>
                     </select>
                   </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-500 mb-1.5">
+                      {walletForm.operation === 'set' ? 'New Balance (₹) *' : 'Amount (₹) *'}
+                    </label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm text-gray-800 bg-white focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none transition-colors"
+                      placeholder={walletForm.operation === 'set' ? 'e.g. 500' : 'Enter Amount'}
+                      value={walletForm.amount}
+                      onChange={(e) => setWalletForm((prev) => ({ ...prev, amount: e.target.value }))}
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-500 mb-1.5">Reason / Note (Optional)</label>
+                    <input
+                      type="text"
+                      className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm text-gray-800 bg-white focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none transition-colors"
+                      placeholder="e.g. Admin adjustment"
+                      value={walletForm.description || ''}
+                      onChange={(e) => setWalletForm((prev) => ({ ...prev, description: e.target.value }))}
+                    />
+                  </div>
                 </div>
-                <div className="mt-4">
+                <div className="mt-4 flex items-center gap-3">
                   <button
                     type="button"
-                    disabled={walletForm.isSubmitting || !walletForm.amount}
+                    disabled={walletForm.isSubmitting || walletForm.amount === ''}
                     onClick={async () => {
                       setWalletForm((prev) => ({ ...prev, isSubmitting: true }));
                       try {
-                        const token = localStorage.getItem('adminToken');
-                        await fetch(
-                          `${globalThis.__LEGACY_BACKEND_ORIGIN__}/api/v1/admin/wallet/drivers/${id}/adjust`,
-                          {
-                            method: 'POST',
-                            headers: {
-                              ...(token ? { Authorization: `Bearer ${token}` } : {}),
-                              'Content-Type': 'application/json',
-                            },
-                            body: JSON.stringify({
-                              amount: Number(walletForm.amount),
-                              operation: walletForm.operation,
-                            }),
-                          },
-                        );
-                        setWalletForm({ amount: '', operation: 'credit', isSubmitting: false });
-                        await fetchProfile();
+                        await adminService.adjustDriverWallet(id, {
+                          amount: Number(walletForm.amount),
+                          operation: walletForm.operation,
+                          description: walletForm.description || `Admin wallet ${walletForm.operation}`,
+                        });
+                        alert(`Driver wallet balance successfully updated!`);
+                        setWalletForm({ amount: '', operation: 'set', description: '', isSubmitting: false });
+                        await Promise.all([
+                          fetchProfile(),
+                          adminService.getDriverWalletHistory(id).then((walletRes) => {
+                            const walletPayload = walletRes?.data?.data || walletRes?.data || walletRes || {};
+                            setWalletHistory(Array.isArray(walletPayload?.results) ? walletPayload.results : []);
+                          }).catch(() => null),
+                        ]);
                       } catch (err) {
+                        alert(err?.response?.data?.message || err?.message || 'Failed to update wallet balance');
                         setWalletForm((prev) => ({ ...prev, isSubmitting: false }));
                       }
                     }}
-                    className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 transition-colors"
+                    className="px-5 py-2.5 bg-indigo-600 text-white rounded-lg text-sm font-semibold hover:bg-indigo-700 transition-colors shadow-sm disabled:opacity-50"
                   >
-                    {walletForm.isSubmitting ? 'Saving...' : 'Submit'}
+                    {walletForm.isSubmitting ? 'Saving...' : 'Update Wallet Balance'}
                   </button>
                 </div>
               </div>
@@ -1038,6 +1209,188 @@ const DriverDetails = () => {
                 </div>
               </div>
 
+              {/* Payment UPI / QR — the driver's own handle shown to riders at
+                  ride-end. Admin verifies it here before it is exposed. */}
+              {(() => {
+                const pay = profile?.paymentUpi || {};
+                const status = String(pay.verificationStatus || 'pending').toLowerCase();
+                const hasUpi = Boolean(pay.upiId);
+                const resolveUrl = (u) =>
+                  !u ? '' : (u.startsWith('http') ? u : `${globalThis.__LEGACY_BACKEND_ORIGIN__}${u}`);
+                const setUpiStatus = async (next) => {
+                  try {
+                    setUpiActionBusy(true);
+                    const token = localStorage.getItem('adminToken');
+                    const response = await fetch(
+                      `${globalThis.__LEGACY_BACKEND_ORIGIN__}/api/v1/admin/drivers/${id}`,
+                      {
+                        method: 'PATCH',
+                        headers: {
+                          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+                          'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({ paymentUpiVerificationStatus: next }),
+                      },
+                    );
+                    const data = await response.json();
+                    if (!response.ok || !data?.success) throw new Error(data?.message || 'Unable to update');
+                    await fetchProfile();
+                  } catch (err) {
+                    window.alert(err?.message || 'Unable to update');
+                  } finally {
+                    setUpiActionBusy(false);
+                  }
+                };
+                const onQrFile = (e) => {
+                  const file = e.target.files?.[0];
+                  if (!file) return;
+                  const reader = new FileReader();
+                  reader.onload = () => setQrDraft(String(reader.result || ''));
+                  reader.readAsDataURL(file);
+                };
+                const saveUpiEdit = async () => {
+                  try {
+                    setUpiActionBusy(true);
+                    const token = localStorage.getItem('adminToken');
+                    const body = { paymentUpiId: upiIdDraft.trim() };
+                    if (qrDraft) body.paymentQrImage = qrDraft;
+                    const response = await fetch(
+                      `${globalThis.__LEGACY_BACKEND_ORIGIN__}/api/v1/admin/drivers/${id}`,
+                      {
+                        method: 'PATCH',
+                        headers: {
+                          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+                          'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify(body),
+                      },
+                    );
+                    const data = await response.json();
+                    if (!response.ok || !data?.success) throw new Error(data?.message || 'Unable to save');
+                    setUpiEditing(false);
+                    setQrDraft('');
+                    await fetchProfile();
+                  } catch (err) {
+                    window.alert(err?.message || 'Unable to save');
+                  } finally {
+                    setUpiActionBusy(false);
+                  }
+                };
+                const badge =
+                  status === 'verified'
+                    ? 'bg-green-100 text-green-700'
+                    : status === 'rejected'
+                      ? 'bg-red-100 text-red-700'
+                      : 'bg-amber-100 text-amber-700';
+                return (
+                  <div className="bg-white rounded-xl border border-gray-200 p-6">
+                    <div className="flex items-start justify-between gap-4">
+                      <div>
+                        <h3 className="text-base text-gray-900 font-bold">Payment UPI / QR</h3>
+                        <p className="mt-1 text-sm text-gray-500">
+                          Shown to riders at ride-end for direct payment. Verify before it goes live.
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-3">
+                        <span className={`rounded-full px-3 py-1 text-xs font-semibold capitalize ${badge}`}>{status}</span>
+                        {!upiEditing && (
+                          <button
+                            type="button"
+                            onClick={() => { setUpiEditing(true); setUpiIdDraft(pay.upiId || ''); setQrDraft(''); }}
+                            className="inline-flex items-center gap-1 rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
+                          >
+                            <PencilLine size={13} /> Edit
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                    {upiEditing ? (
+                      <div className="mt-5 space-y-4">
+                        <div>
+                          <label className="text-xs font-semibold uppercase tracking-wide text-gray-500">UPI ID</label>
+                          <input
+                            type="text"
+                            value={upiIdDraft}
+                            onChange={(e) => setUpiIdDraft(e.target.value)}
+                            placeholder="name@bank"
+                            className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
+                          />
+                        </div>
+                        <div>
+                          <label className="text-xs font-semibold uppercase tracking-wide text-gray-500">QR scanner image</label>
+                          <input type="file" accept="image/*" onChange={onQrFile} className="mt-1 block text-sm" />
+                          {(qrDraft || pay.qrCodeImage) ? (
+                            <img
+                              src={qrDraft || resolveUrl(pay.qrCodeImage)}
+                              alt="QR preview"
+                              className="mt-3 h-36 w-36 rounded-lg border border-gray-200 object-contain bg-white"
+                            />
+                          ) : null}
+                        </div>
+                        <div className="flex gap-3">
+                          <button
+                            type="button"
+                            disabled={upiActionBusy}
+                            onClick={saveUpiEdit}
+                            className="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-medium text-white hover:bg-sky-700 disabled:opacity-50"
+                          >
+                            Save
+                          </button>
+                          <button
+                            type="button"
+                            disabled={upiActionBusy}
+                            onClick={() => { setUpiEditing(false); setQrDraft(''); }}
+                            className="inline-flex items-center gap-2 rounded-lg border border-gray-200 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    ) : hasUpi ? (
+                      <div className="mt-5 flex flex-col gap-5 md:flex-row md:items-start">
+                        <div className="flex-1 space-y-2">
+                          <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">UPI ID</p>
+                          <p className="text-sm font-semibold text-gray-900 break-all">{pay.upiId}</p>
+                          {pay.verifiedName ? (
+                            <p className="text-xs text-gray-500">Name: {pay.verifiedName}</p>
+                          ) : null}
+                          {pay.verifiedAt ? (
+                            <p className="text-xs text-gray-500">Verified: {formatDateTime(pay.verifiedAt)}</p>
+                          ) : null}
+                          <div className="flex gap-3 pt-3">
+                            <button
+                              type="button"
+                              disabled={upiActionBusy || status === 'verified'}
+                              onClick={() => setUpiStatus('verified')}
+                              className="inline-flex items-center gap-2 rounded-lg bg-green-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-green-700 disabled:opacity-50"
+                            >
+                              <CheckCircle2 size={15} /> Verify
+                            </button>
+                            <button
+                              type="button"
+                              disabled={upiActionBusy || status === 'rejected'}
+                              onClick={() => setUpiStatus('rejected')}
+                              className="inline-flex items-center gap-2 rounded-lg border border-red-200 px-4 py-2 text-sm font-medium text-red-600 transition-colors hover:bg-red-50 disabled:opacity-50"
+                            >
+                              Reject
+                            </button>
+                          </div>
+                        </div>
+                        {pay.qrCodeImage ? (
+                          <img
+                            src={resolveUrl(pay.qrCodeImage)}
+                            alt="Driver UPI QR"
+                            className="h-40 w-40 rounded-lg border border-gray-200 object-contain bg-white"
+                          />
+                        ) : null}
+                      </div>
+                    ) : (
+                      <div className="mt-5 text-sm text-gray-400">Driver has not added a payment UPI yet.</div>
+                    )}
+                  </div>
+                );
+              })()}
+
               <div className="space-y-4">
                 {documents.length === 0 ? (
                   <div className="bg-white rounded-xl border border-gray-200 p-12 text-center text-gray-400">
@@ -1049,7 +1402,7 @@ const DriverDetails = () => {
                       {/* Header */}
                       <div className="px-5 py-3 border-b border-gray-100 bg-white flex flex-col md:flex-row md:items-center justify-between gap-3">
                         <div className="flex items-center gap-3">
-                          <h4 className="text-sm font-semibold text-gray-900">{toTitleCase(doc.verificationLabel || doc.name)}</h4>
+                          <h4 className="text-sm font-semibold text-gray-900">{doc.label || toTitleCase(doc.verificationLabel || doc.name)}</h4>
                           <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium ${
                             String(doc.status || '').toLowerCase() === 'approved' 
                               ? 'bg-emerald-50 text-emerald-700' 
@@ -1068,6 +1421,58 @@ const DriverDetails = () => {
                         {/* Column 1: Document Details */}
                         <div>
                           <h5 className="text-sm font-semibold text-gray-900 mb-4">Document details</h5>
+                          {editingDocKey === doc.sourceKey ? (
+                            <div className="space-y-3">
+                              <label className="block text-sm">
+                                <span className="text-gray-500 font-medium">Identify number</span>
+                                <input
+                                  type="text"
+                                  value={docDraft.identify_number}
+                                  onChange={(e) => setDocDraft((draft) => ({ ...draft, identify_number: e.target.value }))}
+                                  className="mt-1 w-full rounded-md border border-gray-200 px-3 py-2 text-sm text-gray-900 focus:border-indigo-400 focus:outline-none"
+                                />
+                              </label>
+                              <label className="block text-sm">
+                                <span className="text-gray-500 font-medium">Expiry date</span>
+                                <input
+                                  type="date"
+                                  value={docDraft.expiry_date}
+                                  onChange={(e) => setDocDraft((draft) => ({ ...draft, expiry_date: e.target.value }))}
+                                  className="mt-1 w-full rounded-md border border-gray-200 px-3 py-2 text-sm text-gray-900 focus:border-indigo-400 focus:outline-none"
+                                />
+                              </label>
+                              <label className="block text-sm">
+                                <span className="text-gray-500 font-medium">Replace document image (optional)</span>
+                                <input
+                                  type="file"
+                                  accept="image/*"
+                                  onChange={(e) => pickReplacementDocument(e.target.files?.[0])}
+                                  className="mt-1 block w-full text-xs text-gray-600 file:mr-3 file:rounded-md file:border-0 file:bg-gray-100 file:px-3 file:py-2 file:text-xs file:font-semibold file:text-gray-700 hover:file:bg-gray-200"
+                                />
+                                {docDraft.image && (
+                                  <img src={docDraft.image} alt="New document preview" className="mt-2 h-24 rounded-md border border-gray-200 object-contain" />
+                                )}
+                              </label>
+                              <div className="flex gap-2 pt-1">
+                                <button
+                                  type="button"
+                                  onClick={() => saveDocumentEdit(doc)}
+                                  disabled={documentActionKey.length > 0}
+                                  className="flex-1 py-2 text-xs font-semibold rounded-md text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50"
+                                >
+                                  {documentActionKey === `${doc.sourceKey}:edit` ? 'Saving...' : 'Save'}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setEditingDocKey('')}
+                                  disabled={documentActionKey.length > 0}
+                                  className="flex-1 py-2 text-xs font-semibold rounded-md text-gray-700 bg-gray-100 hover:bg-gray-200 disabled:opacity-50"
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            </div>
+                          ) : (
                           <div className="space-y-3">
                             <div className="flex justify-between items-start text-sm border-b border-gray-50 pb-2">
                               <span className="text-gray-500 font-medium">Identify number</span>
@@ -1110,6 +1515,7 @@ const DriverDetails = () => {
                               </div>
                             )}
                           </div>
+                          )}
                         </div>
 
                         {/* Column 2: Verification Data */}
@@ -1194,6 +1600,14 @@ const DriverDetails = () => {
                                 className="flex-1 py-2 text-xs font-semibold text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-md transition-colors disabled:opacity-50"
                             >
                                 View doc
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => startEditingDocument(doc)}
+                              disabled={documentActionKey.length > 0 || !doc.sourceKey || editingDocKey === doc.sourceKey}
+                              className="flex-1 py-2 text-xs font-semibold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 rounded-md transition-colors disabled:opacity-50"
+                            >
+                              Edit
                             </button>
                             <button
                               type="button"

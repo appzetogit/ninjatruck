@@ -89,6 +89,19 @@ export const clearDriverRegistrationSession = () => {
   localStorage.removeItem(STORAGE_KEY);
 };
 
+const OWNER_RETURN_PATH_KEY = "ownerReturnPath";
+
+/// The owner page someone opened before being asked to log in.
+export const rememberOwnerReturnPath = (path = "") => {
+  writeSessionValue(OWNER_RETURN_PATH_KEY, path);
+};
+
+export const takeOwnerReturnPath = () => {
+  const path = readSessionValue(OWNER_RETURN_PATH_KEY);
+  removeSessionValue(OWNER_RETURN_PATH_KEY);
+  return path.startsWith("/taxi/owner/") ? path : "";
+};
+
 export const clearDriverAuthState = () => {
   clearDriverRegistrationSession();
   DRIVER_AUTH_KEYS.forEach((key) => {
@@ -560,6 +573,37 @@ export const getOwnerFleetZones = () =>
 export const getOwnerBusServices = () =>
   api.get("/drivers/fleet/bus-services", withDriverAuth());
 
+export const getOwnerBusSeatLayout = (busId, params = {}) =>
+  api.get(`/drivers/fleet/bus-services/${busId}/seats`, withDriverAuth({ params }));
+
+export const createOwnerBusReservation = (busId, payload) =>
+  api.post(`/drivers/fleet/bus-services/${busId}/reservations`, payload, withDriverAuth());
+
+// Prepaid counter seats and the vendor wallet.
+export const holdOwnerBusSeats = (busId, payload) =>
+  api.post(`/drivers/fleet/bus-services/${busId}/reservations/hold`, payload, withDriverAuth());
+
+export const payOwnerBusBookingFromWallet = (bookingId) =>
+  api.post(`/drivers/fleet/bus-bookings/${bookingId}/pay-wallet`, {}, withDriverAuth());
+
+export const createOwnerBusBookingPaymentOrder = (bookingId) =>
+  api.post(`/drivers/fleet/bus-bookings/${bookingId}/pay-order`, {}, withDriverAuth());
+
+export const verifyOwnerBusBookingPayment = (bookingId, payment) =>
+  api.post(`/drivers/fleet/bus-bookings/${bookingId}/pay-verify`, payment, withDriverAuth());
+
+export const releaseOwnerBusBookingHold = (bookingId) =>
+  api.post(`/drivers/fleet/bus-bookings/${bookingId}/release`, {}, withDriverAuth());
+
+export const getOwnerBusWallet = () =>
+  api.get("/drivers/fleet/bus-wallet", withDriverAuth());
+
+export const createOwnerBusWalletTopUp = (amount) =>
+  api.post("/drivers/fleet/bus-wallet/topup-order", { amount }, withDriverAuth());
+
+export const verifyOwnerBusWalletTopUp = (payment) =>
+  api.post("/drivers/fleet/bus-wallet/topup-verify", payment, withDriverAuth());
+
 export const getOwnerBusBookings = (params = {}) =>
   api.get("/drivers/fleet/bus-bookings", withDriverAuth({ params }));
 
@@ -568,6 +612,21 @@ export const getOwnerBusBookingCalendar = (params = {}) =>
 
 export const cancelOwnerBusBookingSeats = (bookingId, payload = {}) =>
   api.post(`/drivers/fleet/bus-bookings/${bookingId}/cancel`, payload, withDriverAuth());
+
+export const blockOwnerBusSeats = (busId, payload) =>
+  api.post(`/drivers/fleet/bus-services/${busId}/seat-blocks`, payload, withDriverAuth());
+
+export const releaseOwnerBusSeatBlocks = (busId, payload) =>
+  api.post(`/drivers/fleet/bus-services/${busId}/seat-blocks/release`, payload, withDriverAuth());
+
+export const setOwnerBusBoarding = (bookingId, state) =>
+  api.patch(`/drivers/fleet/bus-bookings/${bookingId}/boarding`, { state }, withDriverAuth());
+
+export const setOwnerBusCollection = (bookingId, method) =>
+  api.patch(`/drivers/fleet/bus-bookings/${bookingId}/collection`, { method }, withDriverAuth());
+
+export const getOwnerBusBookingTicket = (bookingId) =>
+  api.get(`/drivers/fleet/bus-bookings/${bookingId}/ticket`, withDriverAuth());
 
 export const createOwnerBusService = (payload) =>
   api.post("/drivers/fleet/bus-services", payload, withDriverAuth());

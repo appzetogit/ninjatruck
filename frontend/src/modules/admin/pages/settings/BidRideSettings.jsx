@@ -7,6 +7,7 @@ import {
   Info,
   X
 } from 'lucide-react';
+import { Link } from 'react-router-dom';
 import api from '../../../../shared/api/axiosInstance';
 import toast from 'react-hot-toast';
 
@@ -44,6 +45,35 @@ const InputField = ({ label, name, value, onChange, placeholder, type = "text", 
          className={`flex-1 w-full bg-white border border-gray-200 ${prefix ? 'rounded-r-lg' : 'rounded-lg'} py-2.5 px-4 text-sm text-gray-900 focus:border-yellow-400 focus:ring-1 focus:ring-yellow-400 transition-all outline-none shadow-sm`}
        />
     </div>
+  </div>
+);
+
+/// The services bidding can be switched on and off for. These match the keys
+/// biddingPolicyService understands; an airport booking reaches the server as
+/// an ordinary city ride, so it follows the city rule.
+const BIDDING_SERVICES = [
+  { key: 'city', label: 'City ride', hint: 'Includes airport pickups and drops' },
+  { key: 'outstation', label: 'Outstation', hint: 'The rider raises their own fare, same as city rides' },
+  { key: 'parcel', label: 'Parcel and delivery', hint: 'The sender raises their own fare, same as city rides' },
+];
+
+const ToggleRow = ({ label, hint, checked, onChange }) => (
+  <div className="flex items-start justify-between gap-6 py-4 border-b border-gray-100 last:border-0">
+    <div>
+      <p className="text-sm font-medium text-gray-800">{label}</p>
+      {hint && <p className="text-xs text-gray-500 mt-0.5">{hint}</p>}
+    </div>
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      onClick={() => onChange(!checked)}
+      className={`relative w-11 h-6 shrink-0 rounded-full transition-colors ${checked ? 'bg-yellow-400' : 'bg-gray-200'}`}
+    >
+      <span
+        className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform ${checked ? 'translate-x-5' : ''}`}
+      />
+    </button>
   </div>
 );
 
@@ -125,13 +155,51 @@ const BidRideSettings = () => {
     setSettings(prev => ({ ...prev, [name]: value }));
   };
 
+  // Stored as a comma separated list, because the settings document is a flat
+  // bag of strings. An absent value means every service, which is how installs
+  // that predate this setting keep behaving.
+  const enabledServices = settings.bidding_services === undefined || settings.bidding_services === null
+    ? BIDDING_SERVICES.map(service => service.key)
+    : String(settings.bidding_services).split(',').map(entry => entry.trim()).filter(Boolean);
+
+  const biddingEnabled = String(settings.bidding_enabled ?? '1') !== '0';
+  const allVehicles = String(settings.bidding_all_vehicles ?? '1') === '1';
+  const incrementAlways = String(settings.user_increment_always ?? '1') === '1';
+
+  const toggleService = (key, next) => {
+    const withoutKey = enabledServices.filter(entry => entry !== key);
+    const updated = next ? [...withoutKey, key] : withoutKey;
+    // Kept in a fixed order so the stored value does not churn with click order.
+    handleChange(
+      'bidding_services',
+      BIDDING_SERVICES.filter(service => updated.includes(service.key)).map(service => service.key).join(','),
+    );
+  };
+
   const openInfoModal = (label) => {
-    let content = "This setting configures the bidding parameters for the ride.";
-    if (label.includes("Low Percentage")) content = "Sets the minimum percentage below the recommended fare that can be offered.";
-    if (label.includes("High Percentage")) content = "Sets the maximum percentage above the recommended fare that can be offered.";
-    if (label.includes("Increase Step") || label.includes("Increase or Decrease")) content = "The increment or decrement step amount when adjusting the bid.";
-    if (label.includes("Wait Time")) content = "How long a user must wait before they can increase their offer to find drivers.";
-    
+    let content = "This setting shapes how much a waiting rider can add to their fare.";
+    if (label.includes("Starting Fare")) {
+      content =
+        "Where a rider starts if they switch bidding on themselves before booking. " +
+        "A rider who simply books and then waits always starts at the fare they " +
+        "were quoted, whatever this says.";
+    }
+    if (label.includes("Highest Fare")) {
+      content =
+        "The ceiling. Once the fare reaches it the card stops offering more and " +
+        "says so, rather than showing a button that fails.";
+    }
+    if (label.includes("Each Tap Adds")) {
+      content =
+        "The step. The app offers four amounts built from it, so Rs 10 here gives " +
+        "the rider + Rs 10, + Rs 20, + Rs 30 and + Rs 40 in one row.";
+    }
+    if (label.includes("Wait Between")) {
+      content =
+        "How long the rider waits between one increase and the next, so the fare " +
+        "cannot be walked to the ceiling in a few seconds.";
+    }
+
     setInfoModal({ open: true, title: label, content });
   };
 
@@ -153,62 +221,84 @@ const BidRideSettings = () => {
         {/* Header Breadcrumb */}
         <div className="flex items-center justify-end mb-2">
            <div className="flex items-center gap-1.5 text-xs font-medium text-gray-500">
-             <span>Business Settings</span>
+             <span>Bidding</span>
              <ChevronRight size={14} />
              <span className="text-gray-900">Bid Ride Settings</span>
            </div>
         </div>
 
-        {/* Driver Section */}
-        <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden flex flex-col lg:flex-row">
-           <div className="flex-1 flex flex-col justify-between">
-              <div>
-                 <SectionHeader title="Driver settings" />
-                 <div className="p-6 space-y-6">
-                    <InputField 
-                       label="Driver Bidding Low Percentage (Least Bid Level)" 
-                       name="bidding_low_percentage" 
-                       value={settings.bidding_low_percentage} 
-                       onChange={handleChange} 
-                       type="number" 
-                       prefix="%"
-                       helpLink
-                       onHelpClick={openInfoModal}
-                    />
-                    <InputField 
-                       label="Driver Bidding High Percentage (Highest Bid Level)" 
-                       name="bidding_high_percentage" 
-                       value={settings.bidding_high_percentage} 
-                       onChange={handleChange} 
-                       type="number" 
-                       prefix="%"
-                       helpLink
-                       onHelpClick={openInfoModal}
-                    />
-                    <InputField 
-                       label="Driver Bid Range From Recommended Price" 
-                       name="bidding_amount_increase_or_decrease" 
-                       value={settings.bidding_amount_increase_or_decrease} 
-                       onChange={handleChange} 
-                       type="number" 
-                       helpLink
-                       onHelpClick={openInfoModal}
-                    />
+        {/* Where bidding is offered at all */}
+        <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+           <SectionHeader title="Where bidding is offered" />
+           <div className="p-6">
+              <ToggleRow
+                 label="Bidding enabled"
+                 hint="Off hides the bid option in the rider app and books every ride at the quoted fare."
+                 checked={biddingEnabled}
+                 onChange={(next) => handleChange('bidding_enabled', next ? '1' : '0')}
+              />
+              <ToggleRow
+                 label="Offer bidding on every vehicle"
+                 hint="On ignores each vehicle type's own dispatch setting, so a newly added vehicle is biddable straight away."
+                 checked={allVehicles}
+                 onChange={(next) => handleChange('bidding_all_vehicles', next ? '1' : '0')}
+              />
+
+              <ToggleRow
+                 label="Offer riders more fare while they wait"
+                 hint="Shows the &quot;nobody is accepting at this fare, add more&quot; card during the search, even if the rider did not switch bidding on when booking. They start at exactly the fare they were quoted. Drivers never name their own price."
+                 checked={incrementAlways}
+                 onChange={(next) => handleChange('user_increment_always', next ? '1' : '0')}
+              />
+
+              <div className={`mt-6 ${biddingEnabled ? '' : 'opacity-40 pointer-events-none'}`}>
+                 <p className="text-sm font-semibold text-gray-900 mb-1">Services</p>
+                 <p className="text-xs text-gray-500 mb-3">
+                    A booking for a service that is switched off is created at the quoted fare
+                    instead, so a rider on an older app version can still book.
+                 </p>
+                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    {BIDDING_SERVICES.map((service) => {
+                      const checked = enabledServices.includes(service.key);
+                      return (
+                        <button
+                          type="button"
+                          key={service.key}
+                          onClick={() => toggleService(service.key, !checked)}
+                          className={`text-left rounded-lg border px-4 py-3 transition-all ${checked ? 'border-yellow-400 bg-yellow-50/60' : 'border-gray-200 bg-white hover:bg-gray-50'}`}
+                        >
+                          <div className="flex items-center gap-2">
+                            <span className={`w-4 h-4 rounded border flex items-center justify-center ${checked ? 'bg-yellow-400 border-yellow-400' : 'border-gray-300'}`}>
+                              {checked && <span className="w-1.5 h-1.5 bg-black rounded-sm" />}
+                            </span>
+                            <span className="text-sm font-medium text-gray-800">{service.label}</span>
+                          </div>
+                          <p className="text-xs text-gray-500 mt-1 ml-6">{service.hint}</p>
+                        </button>
+                      );
+                    })}
                  </div>
-              </div>
-              <div className="px-6 py-5 bg-gray-50/50 border-t border-gray-100 flex justify-end">
-                 <button 
-                  onClick={handleUpdate}
-                  disabled={saving}
-                  className="bg-yellow-400 text-black px-6 py-2.5 rounded-lg text-sm font-semibold shadow-sm flex items-center gap-2 hover:bg-yellow-500 active:scale-95 transition-all disabled:opacity-50"
-                 >
-                   {saving ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
-                   Update Driver Settings
-                 </button>
+                 <p className="text-xs text-gray-500 mt-4">
+                    How long a bidding ride is searched for, and the distance it is capped at,
+                    live on{' '}
+                    <Link
+                      to="/admin/settings/business/transport-ride"
+                      className="text-yellow-600 font-semibold hover:underline"
+                    >
+                      Transport Ride Settings
+                    </Link>.
+                 </p>
               </div>
            </div>
-           <div className="lg:w-[350px]">
-              <PreviewBox label="Driver app" />
+           <div className="px-6 py-5 bg-gray-50/50 border-t border-gray-100 flex justify-end">
+              <button 
+               onClick={handleUpdate}
+               disabled={saving}
+               className="bg-yellow-400 text-black px-6 py-2.5 rounded-lg text-sm font-semibold shadow-sm flex items-center gap-2 hover:bg-yellow-500 active:scale-95 transition-all disabled:opacity-50"
+              >
+                {saving ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
+                Update Availability
+              </button>
            </div>
         </div>
 
@@ -216,10 +306,10 @@ const BidRideSettings = () => {
         <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden flex flex-col lg:flex-row">
            <div className="flex-1 flex flex-col justify-between">
               <div>
-                 <SectionHeader title="User settings" />
+                 <SectionHeader title="Fare the rider can add" />
                  <div className="p-6 space-y-6">
                     <InputField 
-                       label="User Fare Low Percentage (Starting Level)" 
+                       label="Starting Fare, % Above The Quoted Price" 
                        name="user_bidding_low_percentage" 
                        value={settings.user_bidding_low_percentage} 
                        onChange={handleChange} 
@@ -229,7 +319,7 @@ const BidRideSettings = () => {
                        onHelpClick={openInfoModal}
                     />
                     <InputField 
-                       label="User Fare High Percentage (Highest Level)" 
+                       label="Highest Fare, % Above The Quoted Price" 
                        name="user_bidding_high_percentage" 
                        value={settings.user_bidding_high_percentage} 
                        onChange={handleChange} 
@@ -239,7 +329,7 @@ const BidRideSettings = () => {
                        onHelpClick={openInfoModal}
                     />
                     <InputField 
-                       label="User Fare Increase Step From Recommended Price" 
+                       label="Amount Each Tap Adds (Rs)" 
                        name="user_bidding_amount_increase_or_decrease" 
                        value={settings.user_bidding_amount_increase_or_decrease} 
                        onChange={handleChange} 
@@ -248,7 +338,7 @@ const BidRideSettings = () => {
                        onHelpClick={openInfoModal}
                     />
                     <InputField 
-                       label="Wait Time Before User Can Increase Fare (Minutes)" 
+                       label="Wait Between Increases (Minutes)" 
                        name="user_fare_increase_wait_minutes" 
                        value={settings.user_fare_increase_wait_minutes} 
                        onChange={handleChange} 
@@ -265,7 +355,7 @@ const BidRideSettings = () => {
                   className="bg-yellow-400 text-black px-6 py-2.5 rounded-lg text-sm font-semibold shadow-sm flex items-center gap-2 hover:bg-yellow-500 active:scale-95 transition-all disabled:opacity-50"
                  >
                    {saving ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
-                   Update User Settings
+                   Update Fare Settings
                  </button>
               </div>
            </div>
