@@ -5,6 +5,8 @@ node_modules/
 .env.*
 !.env.example
 uploads/
+# Driving licence photos
+private/
 dist/
 coverage/
 npm-debug.log*

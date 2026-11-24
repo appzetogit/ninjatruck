@@ -75,7 +75,7 @@ export const ADMIN_SIDEBAR_SECTIONS = [
       },
       {
         icon: Briefcase,
-        label: 'Rental With Driver',
+        label: 'Rentals',
         subItems: [
           { label: 'Bookings', path: '/admin/driver-rentals', permission: 'rental.view' },
           { label: 'Vehicles & Prices', path: '/admin/pricing/rental-vehicles', permission: 'rental.view' },
@@ -107,11 +107,6 @@ export const ADMIN_SIDEBAR_SECTIONS = [
           { label: 'Service Stores', path: '/admin/pricing/service-stores', permission: 'service_stores.view' },
           { label: 'Pending Service Stores', path: '/admin/pricing/service-stores/pending', permission: 'service_stores.view' },
           { label: 'Pending Service Staff', path: '/admin/pricing/service-stores/pending-staff', permission: 'service_stores.view' },
-          { label: 'Rental Commission', path: '/admin/pricing/rental-commission', permission: 'rental.view' },
-          { label: 'Rental Vehicles', path: '/admin/pricing/rental-vehicles', permission: 'rental.view' },
-          { label: 'Track Vehicles', path: '/admin/pricing/rental-tracking', permission: 'rental.view' },
-          { label: 'Rental Requests', path: '/admin/pricing/rental-requests', permission: 'rental.view' },
-          { label: 'Rental Quote Requests', path: '/admin/pricing/rental-quotes', permission: 'rental.view' },
           { label: 'Rental Package Types', path: '/admin/pricing/rental-packages', permission: 'rental.view' },
           { label: 'Package Pricing', path: '/admin/pricing/package-pricing', permission: 'rental.view' },
         ],

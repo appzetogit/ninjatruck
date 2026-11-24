@@ -18,10 +18,60 @@ const PACKAGES = [
   { hours: 12, label: '12 Hours' },
 ];
 const rupees = (n) => `₹${Number(n).toLocaleString('en-IN')}`;
-const packageOf = (vehicle, hours) =>
-  (vehicle.pricing || []).find((p) => Number(p.durationHours) === hours && p.active !== false);
+const packageOf = (vehicle, hours, key) =>
+  (vehicle[key] || []).find((p) => Number(p.durationHours) === hours && p.active !== false);
 
-/** Vehicle photos, then the live "Rental With Driver" price list from admin. */
+/** One rental type's prices; nothing when no vehicle is priced for it. */
+const PriceTable = ({ title, vehicles, priceKey }) => {
+  const rows = vehicles.filter((v) => PACKAGES.some(({ hours }) => packageOf(v, hours, priceKey)));
+  if (rows.length === 0) return null;
+  return (
+    <div className="mb-12 last:mb-0">
+      <h3 className="text-center text-3xl lg:text-5xl font-black text-[#111111] tracking-tighter uppercase mb-8">{title}</h3>
+      <div className="bg-white border-2 border-[#111111] rounded-2xl overflow-hidden shadow-[6px_6px_0_0_#111111]">
+        <table className="w-full text-left text-[#111111]">
+          <thead className="bg-[#111111] text-[#F9C105] uppercase">
+            <tr>
+              <th className="px-3 sm:px-6 py-4 font-black text-xs sm:text-base">Vehicle</th>
+              {PACKAGES.map(({ hours, label }) => (
+                <th key={hours} className="px-2 sm:px-6 py-4 font-black text-right text-xs sm:text-base">{label}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((v) => (
+              <tr key={v.id} className="border-t-2 border-[#111111]/10">
+                <td className="px-3 sm:px-6 py-3">
+                  <div className="flex items-center gap-4 font-black text-sm sm:text-lg leading-tight">
+                    <img src={v.image} alt="" loading="lazy" className="hidden sm:block w-20 h-14 object-contain" />
+                    {v.name}
+                  </div>
+                </td>
+                {PACKAGES.map(({ hours }) => {
+                  const p = packageOf(v, hours, priceKey);
+                  return (
+                    <td key={hours} className="px-2 sm:px-6 py-3 text-right">
+                      {p ? (
+                        <>
+                          <div className="font-black text-base sm:text-xl">{rupees(p.price)}</div>
+                          <div className="text-[11px] sm:text-sm font-bold text-slate-600">up to {p.includedKm} km</div>
+                        </>
+                      ) : (
+                        '-'
+                      )}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+};
+
+/** Vehicle photos, then the live rental prices from admin. */
 export default function FleetSection() {
   const [rentals, setRentals] = useState([]);
 
@@ -32,11 +82,8 @@ export default function FleetSection() {
       .then((res) => {
         const list = res?.data?.results || res?.results || [];
         if (!alive || !Array.isArray(list)) return;
-        setRentals(
-          list
-            .filter((v) => packageOf(v, 1))
-            .sort((a, b) => packageOf(a, 1).price - packageOf(b, 1).price),
-        );
+        const first = (v) => v.pricing?.[0]?.price ?? v.selfDrivePricing?.[0]?.price ?? 0;
+        setRentals([...list].sort((a, b) => first(a) - first(b)));
       })
       .catch(() => {}); // the photos still show without the price list
     return () => {
@@ -65,48 +112,8 @@ export default function FleetSection() {
 
         {rentals.length > 0 && (
           <div id="rental" className="mt-20 max-w-4xl mx-auto">
-            <h3 className="text-center text-3xl lg:text-5xl font-black text-[#111111] tracking-tighter uppercase mb-8">
-              Rental With Driver
-            </h3>
-            <div className="bg-white border-2 border-[#111111] rounded-2xl overflow-hidden shadow-[6px_6px_0_0_#111111]">
-              <table className="w-full text-left text-[#111111]">
-                <thead className="bg-[#111111] text-[#F9C105] uppercase">
-                  <tr>
-                    <th className="px-3 sm:px-6 py-4 font-black text-xs sm:text-base">Vehicle</th>
-                    {PACKAGES.map(({ hours, label }) => (
-                      <th key={hours} className="px-2 sm:px-6 py-4 font-black text-right text-xs sm:text-base">{label}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {rentals.map((v) => (
-                    <tr key={v.id} className="border-t-2 border-[#111111]/10">
-                      <td className="px-3 sm:px-6 py-3">
-                        <div className="flex items-center gap-4 font-black text-sm sm:text-lg leading-tight">
-                          <img src={v.image} alt="" loading="lazy" className="hidden sm:block w-20 h-14 object-contain" />
-                          {v.name}
-                        </div>
-                      </td>
-                      {PACKAGES.map(({ hours }) => {
-                        const p = packageOf(v, hours);
-                        return (
-                          <td key={hours} className="px-2 sm:px-6 py-3 text-right">
-                            {p ? (
-                              <>
-                                <div className="font-black text-base sm:text-xl">{rupees(p.price)}</div>
-                                <div className="text-[11px] sm:text-sm font-bold text-slate-600">up to {p.includedKm} km</div>
-                              </>
-                            ) : (
-                              '-'
-                            )}
-                          </td>
-                        );
-                      })}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <PriceTable title="Rental With Driver" vehicles={rentals} priceKey="pricing" />
+            <PriceTable title="Rental Without Driver" vehicles={rentals} priceKey="selfDrivePricing" />
             <div className="flex flex-wrap justify-center gap-4 mt-8">
               <Link
                 to="/taxi/user/rental"

@@ -1377,6 +1377,10 @@ const serializeRentalVehicleType = (item = {}) => ({
   pricing: Array.isArray(item.pricing)
     ? item.pricing.map((price, index) => normalizeRentalPricingItem(price, index))
     : DEFAULT_RENTAL_PRICING.map((price, index) => normalizeRentalPricingItem(price, index)),
+  selfDriveEnabled: Boolean(item.selfDriveEnabled),
+  selfDrivePricing: item.selfDriveEnabled && Array.isArray(item.selfDrivePricing)
+    ? item.selfDrivePricing.map((price, index) => normalizeRentalPricingItem(price, index))
+    : [],
   status: item.status || 'active',
   active: item.active !== false && item.status !== 'inactive',
   createdAt: item.createdAt,

@@ -108,6 +108,10 @@ export const adminService = {
   getDriverRentals: (params) => api.get('/admin/driver-rentals', { params }),
   processDriverRental: (id, data) => api.patch(`/admin/driver-rentals/${id}`, data),
 
+  getDriverRentalLicence: (id) => api.get(`/admin/driver-rentals/${id}/licence`),
+  getRentalFleet: () => api.get('/admin/rental-fleet'),
+  saveRentalFleetVehicle: (id, data) => (id ? api.patch(`/admin/rental-fleet/${id}`, data) : api.post('/admin/rental-fleet', data)),
+
   // Vehicle insurance (Price Management > Vehicle Insurance)
   getInsuranceApplications: (params) => api.get('/insurance/admin', { params }),
   processInsuranceApplication: (id, data) => api.patch(`/insurance/admin/${id}`, data),

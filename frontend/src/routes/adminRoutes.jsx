@@ -116,13 +116,8 @@ import {
   AdminVehicleInsurance,
   AdminDriverRentals,
   AdminRewardClaims,
-  AdminRentalBookingRequests,
-  AdminRentalCommissionManager,
   AdminRentalPackageTypes,
-  AdminRentalQuoteRequests,
-  AdminRentalTracking,
-  AdminRentalTrackingDetail,
-  AdminRentalVehicleTypes,
+  AdminRentalFleet,
   AdminSMSGateways,
   AdminSafetyCenter,
   AdminSendNotification,
@@ -362,7 +357,6 @@ const adminRoutes = (
         <Route path="service-stores" element={<AdminServiceStores />} />
         <Route path="service-stores/pending" element={<AdminPendingServiceStores />} />
         <Route path="service-stores/pending-staff" element={<AdminPendingServiceStaff />} />
-        <Route path="rental-commission" element={<AdminRentalCommissionManager />} />
         <Route path="service-stores/add" element={<AdminServiceStores mode="create" />} />
         <Route path="service-stores/edit/:id" element={<AdminServiceStores mode="edit" />} />
         <Route path="app-modules" element={<AdminAppModules />} />
@@ -378,14 +372,7 @@ const adminRoutes = (
         <Route path="vehicle-type" element={<AdminVehicleType />} />
         <Route path="vehicle-type/create" element={<AdminVehicleType mode="create" />} />
         <Route path="vehicle-type/edit/:id" element={<AdminVehicleType mode="edit" />} />
-        <Route path="rental-vehicles" element={<AdminRentalVehicleTypes />} />
-        <Route path="rental-vehicles/create" element={<AdminRentalVehicleTypes mode="create" />} />
-        <Route path="rental-vehicles/edit/:id" element={<AdminRentalVehicleTypes mode="edit" />} />
-        <Route path="rental-vehicles/view/:id" element={<AdminRentalVehicleTypes mode="view" />} />
-        <Route path="rental-tracking" element={<AdminRentalTracking />} />
-        <Route path="rental-tracking/:id" element={<AdminRentalTrackingDetail />} />
-        <Route path="rental-requests" element={<AdminRentalBookingRequests />} />
-        <Route path="rental-quotes" element={<AdminRentalQuoteRequests />} />
+        <Route path="rental-vehicles" element={<AdminRentalFleet />} />
         <Route path="rental-packages" element={<AdminRentalPackageTypes />} />
         <Route path="rental-packages/create" element={<AdminRentalPackageTypes mode="create" />} />
         <Route path="rental-packages/edit/:id" element={<AdminRentalPackageTypes mode="edit" />} />

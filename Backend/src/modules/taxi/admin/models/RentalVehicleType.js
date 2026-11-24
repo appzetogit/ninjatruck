@@ -194,6 +194,15 @@ const rentalVehicleTypeSchema = new mongoose.Schema(
       type: [rentalVehiclePricingSchema],
       default: [],
     },
+    // "pricing" is with driver; this list is without driver.
+    selfDriveEnabled: {
+      type: Boolean,
+      default: false,
+    },
+    selfDrivePricing: {
+      type: [rentalVehiclePricingSchema],
+      default: [],
+    },
     advancePayment: {
       type: rentalVehicleAdvancePaymentSchema,
       default: () => ({

@@ -256,38 +256,23 @@ export const normalizePoolingBooking = (booking) => {
 
 export const normalizeRentalBooking = (booking) => {
   const status = formatStatus(booking?.status || 'pending');
-  const locationName = pickFirstString(
-    booking?.serviceLocation?.name,
-    booking?.serviceLocation?.city,
-    'Rental pickup hub',
-  );
-  const assignedVehicleName = pickFirstString(booking?.assignedVehicle?.name, booking?.vehicleName, 'Rental vehicle');
-  const title = pickFirstString(
-    booking?.vehicleName,
-    booking?.selectedPackage?.label ? `Rental - ${booking.selectedPackage.label}` : '',
-    'Rental booking',
-  );
-  const pickupTimeSource = booking?.pickupDateTime || booking?.createdAt;
+  const vehicle = pickFirstString(booking?.vehicleName, 'Rental vehicle');
 
   return {
-    id: booking?.id || booking?._id,
+    id: booking?._id,
     type: 'rental',
-    title,
-    address: `${locationName} to ${pickFirstString(booking?.serviceLocation?.address, booking?.serviceLocation?.city, 'Return at same hub')}`,
-    date: formatRideDate(pickupTimeSource),
-    time: formatRideTime(pickupTimeSource),
+    title: vehicle,
+    address: pickFirstString(booking?.pickupAddress, 'Rental'),
+    date: formatRideDate(booking?.pickupAt),
+    time: formatRideTime(booking?.pickupAt),
     status,
     statusTone: getStatusTone(status),
-    price: Number(booking?.totalCost || 0).toFixed(0),
-    driverName: assignedVehicleName,
-    eyebrow: pickFirstString(booking?.selectedPackage?.label, booking?.bookingReference, 'Rental booking'),
-    driverImage: buildAvatarFallback(assignedVehicleName),
-    vehicleImage: pickFirstString(
-      booking?.assignedVehicle?.image,
-      booking?.vehicleImage,
-      carIcon,
-    ),
+    price: Number(booking?.package?.price || 0).toFixed(0),
+    driverName: pickFirstString(booking?.driver?.name, vehicle),
+    eyebrow: booking?.rentalType === 'self_drive' ? 'Rental without driver' : 'Rental with driver',
+    driverImage: buildAvatarFallback(vehicle),
+    vehicleImage: pickFirstString(booking?.vehicleImage, carIcon),
     booking,
-    sortTimestamp: toTimestamp(booking?.updatedAt || booking?.pickupDateTime || booking?.createdAt),
+    sortTimestamp: toTimestamp(booking?.createdAt),
   };
 };

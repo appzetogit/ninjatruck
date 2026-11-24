@@ -1,17 +1,21 @@
 import mongoose from 'mongoose';
 
 /**
- * Rental with driver: the customer books a vehicle and driver for a fixed
- * package (hours + km). The vehicle comes to the customer, so there is no
- * licence check or pickup store, unlike RentalBookingRequest (self-drive).
- * Price and package are copied at booking time, so later price edits never
- * change an existing booking.
+ * Rentals, with or without a driver, for a fixed package (hours + km). The
+ * vehicle comes to the customer's address, so there are no stores or service
+ * locations. Price and package are copied at booking time, so later price
+ * edits never change an existing booking.
+ *
+ * with_driver: pending -> confirmed -> completed
+ * self_drive:  pending -> confirmed -> active (vehicle out) -> completed
  */
-export const DRIVER_RENTAL_STATUSES = ['pending', 'confirmed', 'completed', 'cancelled'];
+export const RENTAL_TYPES = ['with_driver', 'self_drive'];
+export const DRIVER_RENTAL_STATUSES = ['pending', 'confirmed', 'active', 'completed', 'cancelled'];
 
 const driverRentalBookingSchema = new mongoose.Schema(
   {
     reference: { type: String, required: true, unique: true },
+    rentalType: { type: String, enum: RENTAL_TYPES, default: 'with_driver', index: true },
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'TaxiUser', required: true, index: true },
     vehicleTypeId: { type: mongoose.Schema.Types.ObjectId, ref: 'TaxiRentalVehicleType', required: true },
     vehicleName: { type: String, required: true },
@@ -26,6 +30,8 @@ const driverRentalBookingSchema = new mongoose.Schema(
     pickupAddress: { type: String, required: true, trim: true, maxlength: 300 },
     pickupAt: { type: Date, required: true },
     notes: { type: String, default: '', trim: true, maxlength: 500 },
+    // File name inside the private licence folder; never sent to clients.
+    licenceFile: { type: String, default: '' },
     status: { type: String, enum: DRIVER_RENTAL_STATUSES, default: 'pending', index: true },
     driver: {
       name: { type: String, default: '', trim: true },

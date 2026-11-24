@@ -236,14 +236,6 @@ const getHelperText = (tab) => {
   return 'Your recent trips, deliveries, and bookings';
 };
 
-const buildRentalActivityState = (booking) => ({
-  ...booking,
-  serviceType: 'rental',
-  rideId: booking?.id || booking?._id || '',
-  status: booking?.status || 'pending',
-  summaryMode: String(booking?.status || '').toLowerCase() === 'completed' ? 'completed' : undefined,
-});
-
 const Activity = () => {
   const [activeTab, setActiveTab] = useState('All');
   const [activities, setActivities] = useState([]);
@@ -319,7 +311,7 @@ const Activity = () => {
     serviceType === 'parcel'
       ? `${routePrefix}/parcel/tracking`
       : serviceType === 'rental'
-        ? `${routePrefix}/rental/confirmed`
+        ? `${routePrefix}/rental`
         : `${routePrefix}/ride/tracking`;
   const rideStage = String(currentRide?.liveStatus || currentRide?.status || 'accepted').toLowerCase();
   const hasAssignedDriver = Boolean(currentRide?.driver?._id || currentRide?.driver?.id || currentRide?.driver?.name);
@@ -605,9 +597,7 @@ const Activity = () => {
     if (item.type === 'bus') {
       navigate(`${routePrefix}/profile/bus-bookings/${item.id}`);
     } else if (item.type === 'rental') {
-      navigate(`${routePrefix}/rental/confirmed`, {
-        state: toHistorySafeState(buildRentalActivityState(item.booking)),
-      });
+      navigate(`${routePrefix}/rental`);
     } else if (item.type === 'pooling') {
       navigate(`${routePrefix}/pooling`);
     } else if (item.type === 'parcel') {

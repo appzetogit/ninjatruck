@@ -1,4 +1,4 @@
-import { Route } from 'react-router-dom';
+import { Navigate, Route } from 'react-router-dom';
 import UserProtectedRoute, { UserHomeRoute } from '../guards/UserProtectedRoute';
 import RideComplete from '../modules/user/pages/ride/RideComplete';
 import {
@@ -32,13 +32,8 @@ import {
   Profile,
   ProfileSettings,
   PromoCodes,
-  RentalConfirmed,
   DriverRental,
   UserVehicleInsurance,
-  RentalDeposit,
-  RentalKYC,
-  RentalSchedule,
-  RentalVehicleDetail,
   RideDetail,
   RideTracking,
   SearchingDriver,
@@ -115,11 +110,8 @@ const userRoutes = (
       <Route path="/taxi/user/pooling/confirm" element={<UserPoolingConfirm />} />
       <Route path="/taxi/user/insurance" element={<UserVehicleInsurance />} />
       <Route path="/taxi/user/rental" element={<DriverRental />} />
-      <Route path="/taxi/user/rental/vehicle" element={<RentalVehicleDetail />} />
-      <Route path="/taxi/user/rental/schedule" element={<RentalSchedule />} />
-      <Route path="/taxi/user/rental/kyc" element={<RentalKYC />} />
-      <Route path="/taxi/user/rental/deposit" element={<RentalDeposit />} />
-      <Route path="/taxi/user/rental/confirmed" element={<RentalConfirmed />} />
+      {/* Old rental steps, kept for saved links. */}
+      <Route path="/taxi/user/rental/*" element={<Navigate to="/taxi/user/rental" replace />} />
       <Route path="/taxi/user/intercity" element={<IntercityHome />} />
       <Route path="/taxi/user/intercity/vehicle" element={<IntercityVehicle />} />
       <Route path="/taxi/user/intercity/details" element={<IntercityDetails />} />

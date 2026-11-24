@@ -42,7 +42,7 @@ export const userService = {
     return response;
   },
   getMyRentalBookings: async (params = {}) => {
-    const response = await api.get('/users/rental-bookings', { params });
+    const response = await api.get('/users/driver-rentals', { params });
     return response;
   },
   getActiveRentalBooking: async () => {

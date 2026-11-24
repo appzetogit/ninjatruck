@@ -19,8 +19,6 @@ import {
   createRentalAdvancePaymentOrder,
   createPhonePeRentalAdvancePaymentOrder,
   payRentalAdvanceWithWallet,
-  createRentalBookingRequest,
-  createRentalQuoteRequest,
   createRazorpayWalletTopupOrder,
   createPhonePeWalletTopupOrder,
   handleUserRazorpayWalletTopupCallback,
@@ -114,8 +112,11 @@ userRouter.get('/zones', asyncHandler(getZones));
 userRouter.get('/rental-vehicles', asyncHandler(getPublicRentalVehicleCatalog));
 userRouter.get('/service-locations', asyncHandler(listPublicServiceLocations));
 userRouter.get('/service-stores', asyncHandler(listPublicServiceStores));
-userRouter.post('/rental-quote-requests', asyncHandler(createRentalQuoteRequest));
-userRouter.post('/rental-bookings', authenticate(['user']), asyncHandler(createRentalBookingRequest));
+// Store-based rentals are closed; bookings go through /users/driver-rentals.
+const rentalMoved = (_req, res) =>
+  res.status(410).json({ success: false, message: 'Please update the app to book a rental' });
+userRouter.post('/rental-quote-requests', rentalMoved);
+userRouter.post('/rental-bookings', rentalMoved);
 userRouter.get('/rental-bookings', authenticate(['user']), asyncHandler(listMyRentalBookings));
 userRouter.get('/rental-bookings/active', authenticate(['user']), asyncHandler(getMyActiveRentalBooking));
 userRouter.post('/rental-bookings/:id/end', authenticate(['user']), asyncHandler(endMyActiveRentalRide));

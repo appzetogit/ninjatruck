@@ -1,4 +1,4 @@
-import { Route } from 'react-router-dom';
+import { Navigate, Route } from 'react-router-dom';
 import UserProtectedRoute, { UserHomeRoute } from '../guards/UserProtectedRoute';
 import landingRoutes from '../modules/landing/landingRoutes';
 import RideComplete from '../modules/user/pages/ride/RideComplete';
@@ -41,13 +41,8 @@ import {
   PromoCodes,
   RazorpayLaunchPage,
   RazorpayStatusPage,
-  RentalConfirmed,
   DriverRental,
   UserVehicleInsurance,
-  RentalDeposit,
-  RentalKYC,
-  RentalSchedule,
-  RentalVehicleDetail,
   RideDetail,
   RideTracking,
   SearchingDriver,
@@ -141,11 +136,8 @@ const publicRoutes = (
 
       <Route path="/insurance" element={<UserVehicleInsurance />} />
       <Route path="/rental" element={<DriverRental />} />
-      <Route path="/rental/vehicle" element={<RentalVehicleDetail />} />
-      <Route path="/rental/schedule" element={<RentalSchedule />} />
-      <Route path="/rental/kyc" element={<RentalKYC />} />
-      <Route path="/rental/deposit" element={<RentalDeposit />} />
-      <Route path="/rental/confirmed" element={<RentalConfirmed />} />
+      {/* Old rental steps, kept for saved links. */}
+      <Route path="/rental/*" element={<Navigate to="/rental" replace />} />
       <Route path="/intercity" element={<IntercityHome />} />
       <Route path="/intercity/vehicle" element={<IntercityVehicle />} />
       <Route path="/intercity/details" element={<IntercityDetails />} />

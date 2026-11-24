@@ -60,12 +60,6 @@ export const BusPreview = lazy(() => import('../modules/user/pages/bus/BusPrevie
 export const BusDetails = lazy(() => import('../modules/user/pages/bus/BusDetails'));
 export const BusConfirm = lazy(() => import('../modules/user/pages/bus/BusConfirm'));
 export const Onboarding = lazy(() => import('../modules/user/pages/auth/Onboarding'));
-export const BikeRentalHome = lazy(() => import('../modules/user/pages/rental/BikeRentalHome'));
-export const RentalVehicleDetail = lazy(() => import('../modules/user/pages/rental/RentalVehicleDetail'));
-export const RentalSchedule = lazy(() => import('../modules/user/pages/rental/RentalSchedule'));
-export const RentalKYC = lazy(() => import('../modules/user/pages/rental/RentalKYC'));
-export const RentalDeposit = lazy(() => import('../modules/user/pages/rental/RentalDeposit'));
-export const RentalConfirmed = lazy(() => import('../modules/user/pages/rental/RentalConfirmed'));
 export const DriverRental = lazy(() => import('../modules/user/pages/rental/DriverRental'));
 export const AdminDriverRentals = lazy(() => import('../modules/admin/pages/price-management/DriverRentals'));
 export const UserVehicleInsurance = lazy(() => import('../modules/user/pages/insurance/VehicleInsurance'));
@@ -199,12 +193,7 @@ export const AdminSurgePricing = lazy(() => import('../modules/admin/pages/price
 export const AdminPriceHike = lazy(() => import('../modules/admin/pages/price-management/PriceHike'));
 export const AdminTollCharges = lazy(() => import('../modules/admin/pages/price-management/TollCharges'));
 export const AdminVehicleType = lazy(() => import('../modules/admin/pages/price-management/VehicleType'));
-export const AdminRentalVehicleTypes = lazy(() => import('../modules/admin/pages/price-management/RentalVehicleTypes'));
-export const AdminRentalCommissionManager = lazy(() => import('../modules/admin/pages/price-management/RentalCommissionManager'));
-export const AdminRentalTracking = lazy(() => import('../modules/admin/pages/price-management/RentalTracking'));
-export const AdminRentalTrackingDetail = lazy(() => import('../modules/admin/pages/price-management/RentalTrackingDetail'));
-export const AdminRentalBookingRequests = lazy(() => import('../modules/admin/pages/price-management/RentalBookingRequests'));
-export const AdminRentalQuoteRequests = lazy(() => import('../modules/admin/pages/price-management/RentalQuoteRequests'));
+export const AdminRentalFleet = lazy(() => import('../modules/admin/pages/price-management/RentalFleet'));
 export const AdminRentalPackageTypes = lazy(() => import('../modules/admin/pages/price-management/RentalPackageTypes'));
 export const AdminGoodsTypes = lazy(() => import('../modules/admin/pages/price-management/GoodsTypes'));
 export const AdminPoolingManager = lazy(() => import('../modules/admin/pages/pooling/PoolingManager'));

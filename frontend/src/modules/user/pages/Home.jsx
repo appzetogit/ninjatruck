@@ -761,7 +761,7 @@ const Home = () => {
         liveStatus: payload?.status || 'end_requested',
       };
       persistCurrentRide(nextRideState);
-      navigate(`${routePrefix}/rental/confirmed`, {
+      navigate(`${routePrefix}/rental`, {
         state: nextRideState,
       });
     } catch (error) {
@@ -998,7 +998,7 @@ const Home = () => {
           return;
         }
 
-        // Rental booking state is synchronized globally by RentalLocationTracker.
+        // Rentals are tracked on their own screen.
         // Avoid re-polling the same "active rental" endpoint from the home page.
         if (isRentalCurrentRide(currentRideRef.current)) {
           consecutiveIdleMissesRef.current = 0;
@@ -1092,7 +1092,7 @@ const Home = () => {
     serviceType === 'parcel'
       ? `${routePrefix}/parcel/tracking`
       : serviceType === 'rental'
-        ? `${routePrefix}/rental/confirmed`
+        ? `${routePrefix}/rental`
         : `${routePrefix}/ride/tracking`;
   const rideStage = String(currentRide?.liveStatus || currentRide?.status || 'accepted').toLowerCase();
   const hasAssignedDriver = Boolean(currentRide?.driver?._id || currentRide?.driver?.id || currentRide?.driver?.name);
