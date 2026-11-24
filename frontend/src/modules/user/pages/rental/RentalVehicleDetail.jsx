@@ -639,18 +639,18 @@ const RentalVehicleDetail = () => {
   const defaultPackage = useMemo(() => {
     if (!pricingRows.length) return null;
 
-    if (duration === 'Daily') {
+    if (duration === '12 Hours') {
       return (
-        pricingRows.find((row) => Number(row.durationHours || 0) >= 24) ||
+        pricingRows.find((row) => Number(row.durationHours || 0) >= 12) ||
         pricingRows[pricingRows.length - 1]
       );
     }
 
-    if (duration === 'Half-Day') {
+    if (duration === '6 Hours') {
       return (
         pricingRows.find((row) => {
           const hours = Number(row.durationHours || 0);
-          return hours >= 6 && hours <= 12;
+          return hours >= 6 && hours < 12;
         }) || pricingRows[Math.min(1, pricingRows.length - 1)]
       );
     }
@@ -1207,7 +1207,7 @@ const RentalVehicleDetail = () => {
                 <p className={`text-[11px] font-bold ${isDark ? 'text-zinc-450' : 'text-slate-400'}`}>
                   {selectedPackage
                     ? packageSuffix(selectedPackage.durationHours)
-                    : { Hourly: '/hr', 'Half-Day': '/6hr', Daily: '/day' }[duration] || '/hr'}
+                    : { Hourly: '/hr', '6 Hours': '/6hr', '12 Hours': '/12hr' }[duration] || '/hr'}
                 </p>
               </div>
             </div>

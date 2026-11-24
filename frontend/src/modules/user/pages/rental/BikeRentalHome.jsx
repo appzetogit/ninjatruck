@@ -4,22 +4,22 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { ArrowLeft, Fuel, Shield, ChevronRight, Star, Info, Car, Search, X, Bike } from 'lucide-react';
 import { userService } from '../../services/userService';
 import { useUserTheme } from '../../../../shared/context/UserThemeContext';
-const DURATION_TABS = ['Hourly', 'Half-Day', 'Daily'];
+const DURATION_TABS = ['Hourly', '6 Hours', '12 Hours'];
 const RENTAL_SELECTED_VEHICLE_STORAGE_KEY = 'selectedRentalVehicleDetail';
 const RENTAL_PAGE_SIZE = 10;
 const CATEGORY_FILTERS = [
   { id: 'all', label: 'All', Icon: Star },
-  { id: 'car', label: 'Cars', Icon: Car },
+  { id: 'truck', label: 'Trucks', Icon: Car },
   { id: 'bike', label: 'Bikes', Icon: Bike },
 ];
 
 const infoBanner = {
-  Hourly: 'Short rentals for quick city use.',
-  'Half-Day': 'Mid-length rentals for errands and local trips.',
-  Daily: 'Full-day rentals for flexible travel and extended usage.',
+  Hourly: 'Vehicle and driver by the hour.',
+  '6 Hours': 'Vehicle and driver for 6 hours, for multiple stops.',
+  '12 Hours': 'Vehicle and driver for a 12-hour day.',
 };
 
-const durationSuffix = { Hourly: '/hr', 'Half-Day': '/6hr', Daily: '/day' };
+const durationSuffix = { Hourly: '/hr', '6 Hours': '/6hr', '12 Hours': '/12hr' };
 const toNavigationSafeData = (value) => {
   try {
     return JSON.parse(JSON.stringify(value));
@@ -41,7 +41,7 @@ const normalizeRentalCategory = (value = '') => {
   const normalized = normalizeSearchValue(value);
 
   if (normalized === 'bike') return 'bike';
-  if (['car', 'suv', 'van'].includes(normalized)) return 'car';
+  if (['truck', 'auto', 'car', 'suv', 'van'].includes(normalized)) return 'truck';
 
   return normalized;
 };
@@ -58,14 +58,13 @@ const normalizeRentalVehicle = (item = {}, index = 0) => {
   const [gradientFrom, gradientTo] = gradientPairs[index % gradientPairs.length];
   const pricing = Array.isArray(item.pricing) ? item.pricing : [];
   const hourly = findPricingBucket(pricing, 1, 5) || pricing[0] || null;
-  const halfDay = findPricingBucket(pricing, 6, 12) || hourly || pricing[0] || null;
-  const daily = findPricingBucket(pricing, 24, Infinity) || pricing[pricing.length - 1] || halfDay || hourly;
+  const halfDay = findPricingBucket(pricing, 6, 11) || hourly || pricing[0] || null;
+  const daily = findPricingBucket(pricing, 12, Infinity) || pricing[pricing.length - 1] || halfDay || hourly;
   const capacity = Number(item.capacity || 0);
   const luggageCapacity = Number(item.luggageCapacity || 0);
   const isBike = String(item.vehicleCategory || '').toLowerCase() === 'bike';
 
   const featureSet = new Set(Array.isArray(item.amenities) ? item.amenities.filter(Boolean) : []);
-  if (capacity > 0) featureSet.add(`${capacity} seat${capacity === 1 ? '' : 's'}`);
   if (luggageCapacity > 0) featureSet.add(`${luggageCapacity} bag${luggageCapacity === 1 ? '' : 's'} space`);
   if (!featureSet.size) {
     featureSet.add(isBike ? 'Helmet included' : 'Comfort ride');
@@ -73,14 +72,14 @@ const normalizeRentalVehicle = (item = {}, index = 0) => {
 
   const prices = {
     Hourly: Number(hourly?.price || 0),
-    'Half-Day': Number(halfDay?.price || 0),
-    Daily: Number(daily?.price || 0),
+    '6 Hours': Number(halfDay?.price || 0),
+    '12 Hours': Number(daily?.price || 0),
   };
 
   const kmLimit = {
     Hourly: `${Number(hourly?.includedKm || 0)} km`,
-    'Half-Day': `${Number(halfDay?.includedKm || 0)} km`,
-    Daily: `${Number(daily?.includedKm || 0)} km`,
+    '6 Hours': `${Number(halfDay?.includedKm || 0)} km`,
+    '12 Hours': `${Number(daily?.includedKm || 0)} km`,
   };
 
   const sortedPackages = [...pricing].sort(
@@ -131,7 +130,7 @@ const normalizeRentalVehicle = (item = {}, index = 0) => {
     tagBg,
     image: item.image || '',
     rating: '4.8',
-    fuel: isBike ? 'Self-drive · License required' : 'Self-drive · Clean and sanitized',
+    fuel: 'With driver',
     prices,
     kmLimit,
     features: Array.from(featureSet).slice(0, 4),
@@ -305,12 +304,12 @@ const BikeRentalHome = () => {
     return vehicles.reduce(
       (accumulator, vehicle) => {
         const category = normalizeRentalCategory(vehicle.normalizedCategory || vehicle.vehicleCategory);
-        if (category === 'car') accumulator.car += 1;
+        if (category === 'truck') accumulator.truck += 1;
         if (category === 'bike') accumulator.bike += 1;
         accumulator.all += 1;
         return accumulator;
       },
-      { all: 0, car: 0, bike: 0 },
+      { all: 0, truck: 0, bike: 0 },
     );
   }, [vehicles]);
 
@@ -388,8 +387,8 @@ const BikeRentalHome = () => {
                 <ArrowLeft size={20} className="text-white group-hover:opacity-80 transition-opacity" strokeWidth={2.5} />
               </motion.button>
               <div className="min-w-0">
-                <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-slate-500/60 leading-none mb-1.5">Self-drive rentals</p>
-                <h1 className="text-[24px] font-[900] tracking-tight text-slate-950 leading-none">Choose Ride</h1>
+                <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-slate-500/60 leading-none mb-1.5">Rental with driver</p>
+                <h1 className="text-[24px] font-[900] tracking-tight text-slate-950 leading-none">Choose Vehicle</h1>
               </div>
             </div>
             <div className="flex flex-col items-end">
@@ -582,8 +581,8 @@ const BikeRentalHome = () => {
                 ? 'border-orange-950/30 bg-gradient-to-br from-orange-950/20 to-[#0f1b2d]' 
                 : 'border-orange-100 bg-gradient-to-br from-orange-50 to-white'
             }`}>
-              <p className="text-[10px] font-black uppercase tracking-[0.18em] text-orange-400">Cars</p>
-              <p className={`mt-1 text-[17px] font-black ${isDark ? 'text-white' : 'text-slate-900'}`}>{categoryCounts.car}</p>
+              <p className="text-[10px] font-black uppercase tracking-[0.18em] text-orange-400">Trucks</p>
+              <p className={`mt-1 text-[17px] font-black ${isDark ? 'text-white' : 'text-slate-900'}`}>{categoryCounts.truck}</p>
             </div>
             <div className={`rounded-[18px] border px-3 py-3 shadow-sm ${
               isDark 
@@ -761,7 +760,7 @@ const BikeRentalHome = () => {
             <Shield size={15} strokeWidth={2} />
           </div>
           <p className="text-[11px] font-bold text-slate-400 leading-relaxed">
-            All rental vehicles shown here come from the admin catalog. Valid driving license and verification are required before pickup.
+            Every rental includes a driver. Prices cover the hours and distance shown.
           </p>
         </div>
       </div>

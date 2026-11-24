@@ -54,6 +54,8 @@ const buildRentalBookingPayload = ({
 const FALLBACK_DURATION_HOURS = {
   Hourly: 1,
   'Half-Day': 6,
+  '6 Hours': 6,
+  '12 Hours': 12,
   Daily: 24,
 };
 

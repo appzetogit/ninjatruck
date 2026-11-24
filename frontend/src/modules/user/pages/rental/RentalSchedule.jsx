@@ -224,7 +224,7 @@ const RentalSchedule = () => {
 
   const defaultHours =
     Number(selectedPackage?.durationHours || 0) ||
-    (duration === 'Hourly' ? 2 : duration === 'Half-Day' ? 6 : 24);
+    (duration === 'Hourly' ? 2 : duration === '6 Hours' ? 6 : 12);
   const defaultPickupDate = startOfDay(roundedNow);
   const defaultPickupTime = `${pad(roundedNow.getHours())}:00`;
   const defaultReturnDateTime = new Date(
@@ -273,10 +273,10 @@ const RentalSchedule = () => {
         Math.ceil(overrunHours) * hourlyOverrunRate;
     } else if (duration === 'Hourly') {
       cost = Math.ceil(hrs) * vehicle.prices['Hourly'];
-    } else if (duration === 'Half-Day') {
-      cost = Math.ceil(hrs / 6) * vehicle.prices['Half-Day'];
+    } else if (duration === '6 Hours') {
+      cost = Math.ceil(hrs / 6) * vehicle.prices['6 Hours'];
     } else {
-      cost = Math.ceil(hrs / 24) * vehicle.prices['Daily'];
+      cost = Math.ceil(hrs / 12) * vehicle.prices['12 Hours'];
     }
 
     return {
@@ -292,7 +292,7 @@ const RentalSchedule = () => {
 
   const suffix = selectedPackage?.durationHours
     ? `${selectedPackage.durationHours}hr block`
-    : { Hourly: 'hr', 'Half-Day': '6hr block', Daily: 'day' }[duration];
+    : { Hourly: 'hr', '6 Hours': '6hr block', '12 Hours': '12hr block' }[duration];
 
   const minimumPickupTime = isSameDay(pickupDate, roundedNow)
     ? `${pad(roundedNow.getHours())}:00`

@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import NinjaHeader from '../components/NinjaHeader';
 import NinjaFooter from '../components/NinjaFooter';
+import FleetSection from '../components/FleetSection';
 import { DRIVER_LOGIN, USER_LOGIN } from '../components/ninjaBrand';
 import {
   ArrowRight,
@@ -44,50 +45,6 @@ const REASONS = [
 ];
 
 const SLANT = { clipPath: 'polygon(15% 0, 100% 0, 85% 100%, 0 100%)' };
-
-/** Brand illustration for the hero: a Ninja Truck lorry on a highway at dusk. */
-const HeroTruck = () => (
-  <svg viewBox="0 0 400 300" className="w-full h-full" role="img" aria-label="Ninja Truck lorry on the highway">
-    <defs>
-      <linearGradient id="nt-sky" x1="0" y1="0" x2="0" y2="1">
-        <stop offset="0" stopColor="#1b1b1b" />
-        <stop offset="1" stopColor="#3a2f08" />
-      </linearGradient>
-    </defs>
-    <rect width="400" height="300" fill="url(#nt-sky)" />
-    <circle cx="300" cy="95" r="46" fill="#F9C105" opacity="0.9" />
-    <path d="M0 190 L70 150 L130 175 L210 130 L290 168 L400 140 L400 210 L0 210Z" fill="#2a2a2a" />
-    <rect y="205" width="400" height="95" fill="#111111" />
-    <g fill="#F9C105">
-      <rect x="10" y="250" width="40" height="6" />
-      <rect x="90" y="250" width="40" height="6" />
-      <rect x="170" y="250" width="40" height="6" />
-      <rect x="250" y="250" width="40" height="6" />
-      <rect x="330" y="250" width="40" height="6" />
-    </g>
-    {/* cargo box */}
-    <rect x="70" y="128" width="190" height="90" rx="4" fill="#F9C105" stroke="#111" strokeWidth="4" />
-    <text x="165" y="168" textAnchor="middle" fontFamily="Outfit, sans-serif" fontWeight="900" fontSize="26" fill="#111" letterSpacing="-1">NINJA</text>
-    <text x="165" y="196" textAnchor="middle" fontFamily="Outfit, sans-serif" fontWeight="900" fontSize="26" fill="#111" letterSpacing="-1">TRUCK</text>
-    {/* cab */}
-    <path d="M264 150 H310 L338 182 V218 H264Z" fill="#ffffff" stroke="#111" strokeWidth="4" strokeLinejoin="round" />
-    <path d="M276 160 H305 L324 182 H276Z" fill="#111" />
-    <rect x="330" y="200" width="12" height="8" fill="#F9C105" stroke="#111" strokeWidth="2" />
-    <rect x="60" y="214" width="286" height="10" fill="#111" />
-    {[110, 220, 306].map((cx) => (
-      <g key={cx}>
-        <circle cx={cx} cy="226" r="20" fill="#111" stroke="#F9C105" strokeWidth="3" />
-        <circle cx={cx} cy="226" r="7" fill="#F9C105" />
-      </g>
-    ))}
-    {/* speed lines */}
-    <g stroke="#F9C105" strokeWidth="4" strokeLinecap="round" opacity="0.8">
-      <line x1="16" y1="150" x2="54" y2="150" />
-      <line x1="4" y1="172" x2="54" y2="172" />
-      <line x1="24" y1="194" x2="54" y2="194" />
-    </g>
-  </svg>
-);
 
 const SectionLabel = ({ children }) => (
   <h2 className="text-white font-black tracking-widest text-lg uppercase mb-4 drop-shadow-sm">- {children} -</h2>
@@ -152,7 +109,7 @@ const NinjaTruckHome = () => {
               />
               <div className="relative z-10 w-full aspect-[4/3] overflow-hidden shadow-2xl shadow-black/50" style={SLANT}>
                 <div className="w-full h-full scale-110 group-hover:scale-105 transition-transform duration-700 ease-out">
-                  <HeroTruck />
+                  <img src="/fleet/ninja-van.webp" alt="Yellow Ninja Truck van" className="w-full h-full object-cover" />
                 </div>
               </div>
             </div>
@@ -205,6 +162,8 @@ const NinjaTruckHome = () => {
           </div>
         </div>
       </section>
+
+      <FleetSection />
 
       {/* Why choose us */}
       <section className="py-32 px-6 lg:px-16 bg-[#F9C105] border-t-2 border-[#111111] overflow-hidden">

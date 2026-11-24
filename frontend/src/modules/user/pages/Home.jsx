@@ -1444,10 +1444,10 @@ const Home = () => {
       <div className="pt-1">
         <div className="mb-2.5 ml-1">
           <h2 className={`text-[19px] font-[900] tracking-tight leading-none ${isDark ? 'text-white' : 'text-slate-900'}`}>
-            Go Places with Ninja Truck
+            Our Fleet
           </h2>
           <p className={`text-[11px] font-[900] tracking-[0.14em] mt-1.5 ${isDark ? 'text-zinc-500' : 'text-slate-400'}`}>
-            Fast bookings to key transit hubs
+            Pick the right vehicle for your load
           </p>
         </div>
 
