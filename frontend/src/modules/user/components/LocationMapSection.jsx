@@ -96,9 +96,10 @@ const darkMapStyle = [
   }
 ];
 
-const LocationMapSection = () => {
+// `fill`: the map fills its parent (customer home) instead of drawing its own card.
+const LocationMapSection = ({ fill = false }) => {
   const { theme } = useUserTheme();
-  const isDark = theme === 'dark';
+  const isDark = theme === 'dark' && !fill;
   const [coords, setCoords] = useState(null);
   const [centerCoords, setCenterCoords] = useState(DEFAULT_CENTER);
   const [status, setStatusState] = useState('idle');
@@ -247,18 +248,18 @@ const LocationMapSection = () => {
     fullscreenControl: false,
     mapTypeControl: false,
     gestureHandling: 'greedy',
-    styles: theme === 'dark' ? darkMapStyle : undefined,
-  }), [theme]);
+    styles: isDark ? darkMapStyle : undefined,
+  }), [isDark]);
 
   return (
     <motion.section
       initial={{ opacity: 0, y: 10 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.45, ease: 'easeOut' }}
-      className="w-full lg:px-5"
+      className={fill ? 'h-full w-full' : 'w-full lg:px-5'}
     >
       {/* Search Header for Desktop */}
-      <div className="hidden lg:flex items-center justify-between gap-3 mb-3">
+      <div className={`hidden items-center justify-between gap-3 mb-3 ${fill ? '' : 'lg:flex'}`}>
         <div className="min-w-0 flex-1">
           <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">Map</p>
           <h3 className="mt-0.5 flex items-baseline gap-1 text-[16px] font-semibold text-slate-900">
@@ -309,10 +310,10 @@ const LocationMapSection = () => {
         </motion.button>
       </div>
 
-      <div className="relative w-full lg:rounded-[20px] lg:bg-[linear-gradient(135deg,rgba(234,179,8,0.40)_0%,rgba(250,204,21,0.22)_50%,rgba(251,146,60,0.16)_100%)] lg:p-[1px] lg:shadow-[0_0_0_1px_rgba(234,179,8,0.10),0_10px_22px_rgba(15,23,42,0.06)]">
+      <div className={fill ? 'relative h-full w-full' : 'relative w-full lg:rounded-[20px] lg:bg-[linear-gradient(135deg,rgba(234,179,8,0.40)_0%,rgba(250,204,21,0.22)_50%,rgba(251,146,60,0.16)_100%)] lg:p-[1px] lg:shadow-[0_0_0_1px_rgba(234,179,8,0.10),0_10px_22px_rgba(15,23,42,0.06)]'}>
         <motion.div
           aria-hidden="true"
-          className="hidden lg:block pointer-events-none absolute inset-0 z-0 rounded-[20px] blur-xl"
+          className={`hidden pointer-events-none absolute inset-0 z-0 rounded-[20px] blur-xl ${fill ? '' : 'lg:block'}`}
           animate={{ opacity: [0.14, 0.26, 0.14] }}
           transition={{ duration: 4.2, repeat: Infinity, ease: 'easeInOut' }}
           style={{
@@ -321,8 +322,8 @@ const LocationMapSection = () => {
           }}
         />
 
-        <div className={`relative z-10 overflow-hidden lg:rounded-[19px] border-b lg:border ${isDark ? 'border-zinc-800 bg-[#0f172a]' : 'border-slate-200 bg-[#F7F8FB]'}`}>
-          <div className="relative h-[220px] lg:h-[480px] w-full">
+        <div className={`relative z-10 overflow-hidden ${fill ? 'h-full' : 'lg:rounded-[19px] border-b lg:border'} ${isDark ? 'border-zinc-800 bg-[#0f172a]' : 'border-slate-200 bg-[#F7F8FB]'}`}>
+          <div className={`relative w-full ${fill ? 'h-full' : 'h-[220px] lg:h-[480px]'}`}>
             {!HAS_VALID_GOOGLE_MAPS_KEY && (
               <div className="flex h-full w-full items-center justify-center px-5 text-center">
                 <div>
@@ -436,13 +437,21 @@ const LocationMapSection = () => {
                 }}
                 className="relative flex flex-col items-center -translate-y-1/2"
               >
-                <div className="absolute -top-10 bg-[#FFB300] text-slate-950 text-[10px] font-black uppercase tracking-wider px-3.5 py-1 rounded-full shadow-[0_4px_12px_rgba(0,0,0,0.15)] border border-white/20 select-none whitespace-nowrap">
-                  Pickup point
-                </div>
+                {!fill && (
+                  <div className="absolute -top-10 bg-[#FFB300] text-slate-950 text-[10px] font-black uppercase tracking-wider px-3.5 py-1 rounded-full shadow-[0_4px_12px_rgba(0,0,0,0.15)] border border-white/20 select-none whitespace-nowrap">
+                    Pickup point
+                  </div>
+                )}
 
-                <div className="w-[1.5px] h-3.5 bg-slate-900/60" />
+                {fill && (
+                  <svg width="28" height="40" viewBox="0 0 28 40" aria-hidden="true">
+                    <path d="M14 39C14 39 27 22 27 13.5A13 13 0 1 0 1 13.5C1 22 14 39 14 39Z" fill="#fff" stroke="#10b981" strokeWidth="2.5" />
+                    <circle cx="14" cy="13.5" r="5.5" fill="#fff" stroke="#10b981" strokeWidth="4" />
+                  </svg>
+                )}
+                <div className={`w-[1.5px] h-3.5 bg-slate-900/60 ${fill ? 'hidden' : ''}`} />
 
-                <div className="w-5 h-5 rounded-full bg-blue-500 border-2 border-white shadow-[0_3px_10px_rgba(0,0,0,0.2)] flex items-center justify-center">
+                <div className={`${fill ? 'hidden' : 'flex'} w-5 h-5 rounded-full bg-blue-500 border-2 border-white shadow-[0_3px_10px_rgba(0,0,0,0.2)] items-center justify-center`}>
                   <div className="w-2.5 h-2.5 rounded-full bg-white animate-pulse" />
                 </div>
               </motion.div>
@@ -453,9 +462,9 @@ const LocationMapSection = () => {
             <button
               type="button"
               onClick={requestLocation}
-              className="block lg:hidden absolute right-4 bottom-28 z-20 flex h-10 w-10 items-center justify-center rounded-full bg-slate-950/80 border border-white/10 text-white shadow-lg active:scale-95 transition-transform"
+              className={`${fill ? 'bottom-12' : 'bottom-28 lg:hidden'} absolute right-4 z-20 flex h-10 w-10 items-center justify-center rounded-full bg-[#0f172a]/90 border border-[#ffffff]/10 text-[#ffffff] shadow-lg active:scale-95 transition-transform`}
             >
-              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className={status === 'loading' ? 'animate-pulse text-yellow-500' : 'text-white'}>
+              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className={status === 'loading' ? 'animate-pulse text-yellow-500' : 'text-[#ffffff]'}>
                 <circle cx="12" cy="12" r="10" />
                 <circle cx="12" cy="12" r="3" />
                 <line x1="12" y1="1" x2="12" y2="3" />
@@ -469,7 +478,7 @@ const LocationMapSection = () => {
               <button
                 type="button"
                 onClick={requestLocation}
-                className="absolute bottom-2 left-2 z-20 rounded-full border border-white/80 bg-white/90 px-3 py-2 text-[11px] font-medium text-slate-700 shadow-sm active:scale-[0.99]"
+                className={`absolute left-2 z-20 ${fill ? 'bottom-12' : 'bottom-2'} rounded-full border border-white/80 bg-white/90 px-3 py-2 text-[11px] font-medium text-slate-700 shadow-sm active:scale-[0.99]`}
               >
                 Use my location
               </button>

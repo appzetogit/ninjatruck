@@ -24,7 +24,8 @@ const BottomNavbar = () => {
   const { pathname } = useLocation();
   const { settings, modules, loading, hasBootstrapSettings } = useSettings();
   const { theme } = useUserTheme();
-  const isDark = theme === 'dark';
+  // The home screen is always light.
+  const isDark = theme === 'dark' && pathname !== '/taxi/user';
   const showBusService = isEnabledFlag(settings.transportRide?.enable_bus_service);
   const busModule = (modules || []).find(m => m.service_type === 'bus' || m.name.toLowerCase() === 'bus');
   const dynamicBusIcon = busModule?.mobile_menu_icon ? normalizeAssetUrl(busModule.mobile_menu_icon) : busIcon;
@@ -87,7 +88,7 @@ const BottomNavbar = () => {
                         damping: 32,
                         mass: 1
                       }}
-                      className="absolute -inset-y-2 -inset-x-4 bg-[#FFC400] rounded-[20px] shadow-[0_8px_20px_rgba(255,196,0,0.35)]"
+                      className={`absolute -inset-y-2 -inset-x-4 rounded-[20px] ${isDark ? 'bg-[#FFC400] shadow-[0_8px_20px_rgba(255,196,0,0.35)]' : 'bg-[#0f172a] shadow-[0_8px_20px_rgba(15,23,42,0.30)]'}`}
                     />
                   )}
                 </AnimatePresence>
@@ -118,7 +119,7 @@ const BottomNavbar = () => {
                       strokeWidth={isActive ? 2.8 : 2}
                       className={`transition-colors duration-300 ${
                         isActive 
-                          ? 'text-slate-950 font-extrabold' 
+                          ? `font-extrabold ${isDark ? 'text-[#020617]' : 'text-[#ffffff]'}` 
                           : isDark
                             ? 'text-zinc-400 group-hover:text-zinc-200' 
                             : 'text-slate-500 group-hover:text-slate-700'
@@ -139,7 +140,7 @@ const BottomNavbar = () => {
                   }}
                   className={`relative z-20 mt-1 font-['Outfit'] text-[9.5px] font-extrabold uppercase tracking-[0.14em] transition-colors duration-300 ${
                     isActive 
-                      ? 'text-slate-950' 
+                      ? (isDark ? 'text-[#020617]' : 'text-[#ffffff]') 
                       : isDark
                         ? 'text-zinc-400 group-hover:text-zinc-200' 
                         : 'text-slate-500 group-hover:text-slate-700'

@@ -738,7 +738,7 @@ body {
   transform: translateX(-50%) !important;
   z-index: 9997 !important;
   width: calc(100% - 32px) !important;
-  max-width: 390px !important;
+  max-width: 480px !important;
   pointer-events: auto !important;
 }
 

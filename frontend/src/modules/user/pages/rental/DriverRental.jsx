@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { ArrowLeft, Camera, Loader2, Phone, Truck } from 'lucide-react';
 import api from '../../../../shared/api/axiosInstance';
 import { useUserTheme } from '../../../../shared/context/UserThemeContext';
@@ -62,13 +62,14 @@ const photoToDataUrl = async (file) => {
 
 const DriverRental = () => {
   const navigate = useNavigate();
+  const location = useLocation();
   const { theme } = useUserTheme();
   const isDark = theme === 'dark';
 
   const [vehicles, setVehicles] = useState([]);
   const [bookings, setBookings] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [type, setType] = useState('with_driver');
+  const [type, setType] = useState(location.state?.rentalType === 'self_drive' ? 'self_drive' : 'with_driver');
   const [hours, setHours] = useState(1);
   const [vehicleId, setVehicleId] = useState('');
   const [address, setAddress] = useState('');
@@ -192,7 +193,7 @@ const DriverRental = () => {
       </header>
 
       <div className="space-y-4 px-5 pt-4">
-        {selfDriveOffered && (
+        {(selfDriveOffered || selfDrive) && (
           <div className="grid grid-cols-2 gap-2">
             {TYPES.map((t) => (
               <button key={t.id} type="button" aria-pressed={type === t.id} onClick={() => setType(t.id)} className={choice(type === t.id)}>
@@ -219,7 +220,7 @@ const DriverRental = () => {
             <Loader2 className="mx-auto my-8 animate-spin text-slate-400" />
           ) : options.length === 0 ? (
             <div className={`py-6 text-center text-sm font-bold ${muted}`}>
-              <Truck className="mx-auto mb-2" /> No vehicles for this duration.
+              <Truck className="mx-auto mb-2" /> {selfDrive && !selfDriveOffered ? 'Rental without driver is coming soon.' : 'No vehicles for this duration.'}
             </div>
           ) : (
             <div className="space-y-2">

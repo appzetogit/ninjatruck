@@ -241,6 +241,7 @@ const ParcelType = () => {
       selectedVehicleIds,
       category: category.id,
       deliveryCategory: category.id,
+      deliveryScope: routeState.deliveryScope || 'city',
       pickup: pickupAddress,
       pickupCoords,
     };
@@ -251,8 +252,19 @@ const ParcelType = () => {
 
     navigate('/taxi/user/parcel/details', {
       state: nextState,
+      // Opened from a home tile: Back should return home, not here.
+      replace: Boolean(routeState.autoCategory),
     });
   };
+
+  // A home tile already chose the category, so go straight to the details.
+  const autoHandledRef = useRef(false);
+  useEffect(() => {
+    const category = DELIVERY_CATEGORY_OPTIONS.find((c) => c.id === routeState.autoCategory);
+    if (!category || loading || vehicleTypes.length === 0 || autoHandledRef.current) return;
+    autoHandledRef.current = true;
+    handleCategorySelect(category);
+  });
 
   return (
     <div className={`min-h-screen w-full max-w-lg mx-auto flex flex-col font-sans relative overflow-x-hidden ${theme === 'dark' ? 'bg-[#05070D]' : 'bg-[#F5F8FF]'}`}>
