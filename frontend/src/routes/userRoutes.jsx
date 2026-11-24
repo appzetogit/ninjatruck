@@ -6,7 +6,6 @@ import {
   AddressSettings,
   AirportCab,
   AirportCabConfirm,
-  BikeRentalHome,
   BusBookingDetail,
   BusBookings,
   BusConfirm,
@@ -34,6 +33,7 @@ import {
   ProfileSettings,
   PromoCodes,
   RentalConfirmed,
+  DriverRental,
   UserVehicleInsurance,
   RentalDeposit,
   RentalKYC,
@@ -114,7 +114,7 @@ const userRoutes = (
       <Route path="/taxi/user/pooling/seats/:id" element={<UserPoolingSeats />} />
       <Route path="/taxi/user/pooling/confirm" element={<UserPoolingConfirm />} />
       <Route path="/taxi/user/insurance" element={<UserVehicleInsurance />} />
-      <Route path="/taxi/user/rental" element={<BikeRentalHome />} />
+      <Route path="/taxi/user/rental" element={<DriverRental />} />
       <Route path="/taxi/user/rental/vehicle" element={<RentalVehicleDetail />} />
       <Route path="/taxi/user/rental/schedule" element={<RentalSchedule />} />
       <Route path="/taxi/user/rental/kyc" element={<RentalKYC />} />

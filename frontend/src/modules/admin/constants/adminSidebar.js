@@ -73,6 +73,14 @@ export const ADMIN_SIDEBAR_SECTIONS = [
           //{ label: 'Goods Types', path: '/admin/pricing/goods-types', permission: 'goods_types.view' },
         ],
       },
+      {
+        icon: Briefcase,
+        label: 'Rental With Driver',
+        subItems: [
+          { label: 'Bookings', path: '/admin/driver-rentals', permission: 'rental.view' },
+          { label: 'Vehicles & Prices', path: '/admin/pricing/rental-vehicles', permission: 'rental.view' },
+        ],
+      },
       { icon: Gavel, label: 'Bidding', path: '/admin/settings/business/bid-ride', permission: 'settings.view' },
       {
         icon: IndianRupee,

@@ -66,6 +66,8 @@ export const RentalSchedule = lazy(() => import('../modules/user/pages/rental/Re
 export const RentalKYC = lazy(() => import('../modules/user/pages/rental/RentalKYC'));
 export const RentalDeposit = lazy(() => import('../modules/user/pages/rental/RentalDeposit'));
 export const RentalConfirmed = lazy(() => import('../modules/user/pages/rental/RentalConfirmed'));
+export const DriverRental = lazy(() => import('../modules/user/pages/rental/DriverRental'));
+export const AdminDriverRentals = lazy(() => import('../modules/admin/pages/price-management/DriverRentals'));
 export const UserVehicleInsurance = lazy(() => import('../modules/user/pages/insurance/VehicleInsurance'));
 export const IntercityHome = lazy(() => import('../modules/user/pages/intercity/IntercityHome'));
 export const CabSharing = lazy(() => import('../modules/user/pages/cabsharing/CabSharing'));

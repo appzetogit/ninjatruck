@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { ApiError } from '../../../../utils/ApiError.js';
 import { asyncHandler } from '../../../../utils/asyncHandler.js';
 import { uploadDataUrl } from '../../../../utils/fileUpload.js';
+import { hasAdminPermission } from '../../admin/services/adminAccessService.js';
 import { authenticate } from '../../middlewares/authMiddleware.js';
 import { enforceAdminReadOnly } from '../../middlewares/adminReadOnlyMiddleware.js';
 import * as insuranceService from '../services/insuranceService.js';
@@ -33,7 +34,11 @@ insuranceRouter.get('/insurance/my', user, asyncHandler(async (req, res) =>
   ok(res, await insuranceService.listMyApplications(req.auth.sub))));
 
 // Admin (Price Management > Vehicle Insurance)
-const admin = [authenticate(['admin']), enforceAdminReadOnly()];
+const requirePermission = (req, _res, next) =>
+  next(hasAdminPermission(req.auth?.admin, 'set_prices.view')
+    ? undefined
+    : new ApiError(403, 'You do not have permission to access this'));
+const admin = [authenticate(['admin']), requirePermission, enforceAdminReadOnly()];
 insuranceRouter.get('/insurance/admin', admin, asyncHandler(async (req, res) =>
   ok(res, await insuranceService.listApplications(req.query))));
 insuranceRouter.get('/insurance/admin/plans', admin, asyncHandler(async (_req, res) =>

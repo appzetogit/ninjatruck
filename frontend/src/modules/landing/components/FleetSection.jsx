@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import api from '../../../shared/api/axiosInstance';
 import { NINJA_BRAND } from './ninjaBrand';
 
@@ -106,7 +107,13 @@ export default function FleetSection() {
                 </tbody>
               </table>
             </div>
-            <div className="text-center mt-8">
+            <div className="flex flex-wrap justify-center gap-4 mt-8">
+              <Link
+                to="/taxi/user/rental"
+                className="inline-block bg-white text-[#111111] border-2 border-[#111111] px-8 py-4 font-black tracking-widest uppercase"
+              >
+                Book Online
+              </Link>
               <a
                 href={`tel:${NINJA_BRAND.phone}`}
                 className="inline-block bg-[#111111] text-[#F9C105] hover:bg-black px-8 py-4 font-black tracking-widest uppercase"

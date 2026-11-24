@@ -7,7 +7,6 @@ import {
   AddressSettings,
   AirportCab,
   AirportCabConfirm,
-  BikeRentalHome,
   BlogPage,
   BusConfirm,
   BusDetails,
@@ -43,6 +42,7 @@ import {
   RazorpayLaunchPage,
   RazorpayStatusPage,
   RentalConfirmed,
+  DriverRental,
   UserVehicleInsurance,
   RentalDeposit,
   RentalKYC,
@@ -140,7 +140,7 @@ const publicRoutes = (
       <Route path="/parcel/detail/:id" element={<RideDetail />} />
 
       <Route path="/insurance" element={<UserVehicleInsurance />} />
-      <Route path="/rental" element={<BikeRentalHome />} />
+      <Route path="/rental" element={<DriverRental />} />
       <Route path="/rental/vehicle" element={<RentalVehicleDetail />} />
       <Route path="/rental/schedule" element={<RentalSchedule />} />
       <Route path="/rental/kyc" element={<RentalKYC />} />

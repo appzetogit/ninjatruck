@@ -104,6 +104,10 @@ export const adminService = {
   getOwnerWalletHistory: (id) => api.get(`/admin/wallet/owners/${id}/history`),
 
   getReferralDashboard: () => api.get('/admin/referral/dashboard'),
+  // Rental with driver
+  getDriverRentals: (params) => api.get('/admin/driver-rentals', { params }),
+  processDriverRental: (id, data) => api.patch(`/admin/driver-rentals/${id}`, data),
+
   // Vehicle insurance (Price Management > Vehicle Insurance)
   getInsuranceApplications: (params) => api.get('/insurance/admin', { params }),
   processInsuranceApplication: (id, data) => api.patch(`/insurance/admin/${id}`, data),
